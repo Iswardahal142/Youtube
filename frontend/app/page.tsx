@@ -58,7 +58,6 @@ export default function Home() {
   const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
-  // Load saved sessions from localStorage
   useEffect(() => {
     const raw = localStorage.getItem("yt_sessions");
     if (raw) setSavedSessions(JSON.parse(raw));
@@ -103,7 +102,6 @@ export default function Home() {
         if (data.status === "done") {
           clearInterval(interval);
           setLoading(false);
-          // Save to history
           const newSession: SavedSession = {
             id,
             url: videoUrl,
@@ -129,18 +127,15 @@ export default function Home() {
     saveSessions(updated);
   };
 
-  const handleDownload = async (clipUrl: string, fileName: string) => {
-    try {
-      const res = await fetch(clipUrl);
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = fileName;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    } catch {
-      window.open(clipUrl, "_blank");
-    }
+  // FIX: Direct anchor download — blob se mobile pe screenshot jaisi file aati thi
+  const handleDownload = (clipUrl: string, fileName: string) => {
+    const a = document.createElement("a");
+    a.href = clipUrl;
+    a.download = fileName;
+    a.target = "_blank";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   const cfg = status ? statusConfig[status.status] : null;
@@ -231,14 +226,15 @@ export default function Home() {
         .btn:active:not(:disabled) { transform: scale(0.98); }
         .btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
 
-        .status-card {
-          background: #111; border: 1px solid #222;
-          border-radius: 20px; padding: 24px;
-          margin-bottom: 16px;
+        /* FIX: Progress section ab card ke andar hi hai, alag card nahi */
+        .progress-section {
+          margin-top: 20px;
+          padding-top: 20px;
+          border-top: 1px solid #1e1e1e;
         }
         .status-header {
           display: flex; align-items: center;
-          justify-content: space-between; margin-bottom: 20px;
+          justify-content: space-between; margin-bottom: 14px;
         }
         .status-label {
           display: flex; align-items: center;
@@ -250,7 +246,7 @@ export default function Home() {
         }
         .progress-track {
           height: 4px; background: #1e1e1e;
-          border-radius: 99px; overflow: hidden; margin-bottom: 24px;
+          border-radius: 99px; overflow: hidden; margin-bottom: 20px;
         }
         .progress-fill {
           height: 100%; border-radius: 99px;
@@ -386,6 +382,7 @@ export default function Home() {
         .error-box {
           background: #1a0a0a; border: 1px solid #3a1515;
           border-radius: 14px; padding: 20px;
+          margin-top: 16px;
         }
         .error-title { color: #ef4444; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
         .error-msg { color: #666; font-size: 13px; line-height: 1.5; }
@@ -407,6 +404,7 @@ export default function Home() {
             <p className="tagline">Long video → Top 10 Shorts/Reels (60 sec each)</p>
           </div>
 
+          {/* URL Card — progress bhi iske andar hi dikhega */}
           <div className="card">
             <div className="label">YouTube URL</div>
             <div className="input-row">
@@ -422,68 +420,67 @@ export default function Home() {
                 {loading ? `Processing${dots}` : "🚀 Clip karo"}
               </button>
             </div>
+
+            {/* FIX: Progress section URL input ke theek niche */}
+            {status && cfg && status.status !== "done" && status.status !== "error" && (
+              <div className="progress-section">
+                <div className="status-header">
+                  <div className="status-label">
+                    <span>{cfg.icon}</span>
+                    <span style={{ color: cfg.color }}>{cfg.label}{loading ? dots : ""}</span>
+                  </div>
+                  <div className="status-pct">{status.progress}%</div>
+                </div>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${status.progress}%`, background: cfg.color }} />
+                </div>
+                <div className="steps">
+                  {Object.entries(statusConfig).filter(([k]) => k !== "done" && k !== "error").map(([key, s]) => {
+                    const order = ["queued","downloading","transcribing","analyzing","cutting","uploading"];
+                    const curIdx = order.indexOf(status.status);
+                    const thisIdx = order.indexOf(key);
+                    const state = thisIdx < curIdx ? "done" : thisIdx === curIdx ? "active" : "";
+                    return (
+                      <div key={key} className={`step ${state}`}>
+                        <div className="step-dot" />
+                        <span className="step-text">{s.icon} {s.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
-          {status && cfg && (
-            <div className="status-card">
-              {status.status !== "done" && status.status !== "error" && (
-                <>
-                  <div className="status-header">
-                    <div className="status-label">
-                      <span>{cfg.icon}</span>
-                      <span style={{ color: cfg.color }}>{cfg.label}{loading ? dots : ""}</span>
+          {/* Clips list — done hone ke baad alag card mein */}
+          {status && status.status === "done" && (
+            <div className="card">
+              <div className="clips-header">
+                ✅ Clips Ready
+                <span className="clip-count">{status.clips.length} clips</span>
+              </div>
+              <div className="clip-list">
+                {status.clips.map(clip => (
+                  <div key={clip.index} className="clip-item">
+                    <div className="clip-num">#{clip.index}</div>
+                    <div className="clip-info">
+                      <div className="clip-reason">{clip.reason}</div>
+                      <div className="clip-time">⏱ {formatTime(clip.start)} se shuru</div>
                     </div>
-                    <div className="status-pct">{status.progress}%</div>
+                    <button className="dl-btn" onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`)}>
+                      ⬇️ Download
+                    </button>
                   </div>
-                  <div className="progress-track">
-                    <div className="progress-fill" style={{ width: `${status.progress}%`, background: cfg.color }} />
-                  </div>
-                  <div className="steps">
-                    {Object.entries(statusConfig).filter(([k]) => k !== "done" && k !== "error").map(([key, s]) => {
-                      const order = ["queued","downloading","transcribing","analyzing","cutting","uploading"];
-                      const curIdx = order.indexOf(status.status);
-                      const thisIdx = order.indexOf(key);
-                      const state = thisIdx < curIdx ? "done" : thisIdx === curIdx ? "active" : "";
-                      return (
-                        <div key={key} className={`step ${state}`}>
-                          <div className="step-dot" />
-                          <span className="step-text">{s.icon} {s.label}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
+                ))}
+              </div>
+            </div>
+          )}
 
-              {status.status === "done" && (
-                <>
-                  <div className="clips-header">
-                    ✅ Clips Ready
-                    <span className="clip-count">{status.clips.length} clips</span>
-                  </div>
-                  <div className="clip-list">
-                    {status.clips.map(clip => (
-                      <div key={clip.index} className="clip-item">
-                        <div className="clip-num">#{clip.index}</div>
-                        <div className="clip-info">
-                          <div className="clip-reason">{clip.reason}</div>
-                          <div className="clip-time">⏱ {formatTime(clip.start)} se shuru</div>
-                        </div>
-                        <button className="dl-btn" onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`)}>
-                          ⬇️ Download
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {status.status === "error" && (
-                <div className="error-box">
-                  <div className="error-title">❌ Error aaya bhai</div>
-                  <div className="error-msg">{status.error || "Kuch toh gadbad hai"}</div>
-                </div>
-              )}
+          {/* Error box */}
+          {status && status.status === "error" && (
+            <div className="error-box">
+              <div className="error-title">❌ Error aaya bhai</div>
+              <div className="error-msg">{status.error || "Kuch toh gadbad hai"}</div>
             </div>
           )}
 
