@@ -4,7 +4,7 @@ from supabase import create_client
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-BUCKET_NAME = "yt-clipperr"
+BUCKET_NAME = "yt-clipper"
 
 # Redis-backed job store (falls back to in-memory if Redis not configured)
 _redis_client = None
