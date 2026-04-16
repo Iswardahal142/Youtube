@@ -227,6 +227,15 @@ def process_video(url: str, job_id: str):
             update_job(job_id, {"status": "error", "error": "Video download failed. Try a different URL."})
             return
 
+        # Thumbnail URL fetch karo
+        thumbnail_url = ""
+        try:
+            from pytubefix import YouTube
+            yt = YouTube(url)
+            thumbnail_url = yt.thumbnail_url or ""
+        except Exception as e:
+            print(f"Thumbnail fetch error: {e}")
+
         duration = get_video_duration(video_path)
 
         update_job(job_id, {"status": "transcribing", "progress": 30})
@@ -266,7 +275,8 @@ def process_video(url: str, job_id: str):
         update_job(job_id, {
             "status": "done",
             "progress": 100,
-            "clips": clips
+            "clips": clips,
+            "thumbnail": thumbnail_url
         })
 
     except Exception as e:
