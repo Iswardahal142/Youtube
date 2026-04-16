@@ -25,36 +25,72 @@ def _setup_cookies():
 
 
 def download_video(url: str, video_path: str) -> bool:
-    """Download video using pytubefix — no JS challenge issues"""
+    """Download video using yt-dlp with multiple client fallbacks"""
+
+    cookies_args = []
+    if os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
+        cookies_args = ["--cookies", COOKIES_PATH]
+
+    # Different player_client strategies to try
+    strategies = [
+        # Strategy 1: tv_embedded — most reliable on servers
+        ["--extractor-args", "youtube:player_client=tv_embedded"],
+        # Strategy 2: web + po_token workaround
+        ["--extractor-args", "youtube:player_client=web"],
+        # Strategy 3: mweb (mobile web)
+        ["--extractor-args", "youtube:player_client=mweb"],
+        # Strategy 4: no extractor args — default
+        [],
+    ]
+
+    base_cmd = [
+        "yt-dlp",
+        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "--no-check-certificates",
+        "--no-playlist",
+        "--socket-timeout", "30",
+        "--retries", "3",
+        "-o", video_path,
+    ] + cookies_args
+
+    for i, strategy in enumerate(strategies):
+        try:
+            cmd = base_cmd + strategy + [url]
+            print(f"Download attempt {i+1} with strategy: {strategy}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            print(f"stdout: {result.stdout[-300:]}")
+            print(f"stderr: {result.stderr[-300:]}")
+            if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+                print(f"Download success on attempt {i+1} ✅")
+                return True
+        except Exception as e:
+            print(f"Strategy {i+1} failed: {e}")
+
+    # Last resort: pytubefix
     try:
+        print("Trying pytubefix as last resort...")
         from pytubefix import YouTube
-        yt = YouTube(url)
-
+        from pytubefix.cli import on_progress
+        yt = YouTube(url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
         stream = (
-            yt.streams
-            .filter(progressive=True, file_extension="mp4")
-            .order_by("resolution")
-            .last()
+            yt.streams.filter(progressive=True, file_extension="mp4")
+            .order_by("resolution").last()
+            or yt.streams.filter(file_extension="mp4").order_by("resolution").last()
+            or yt.streams.first()
         )
-
-        if not stream:
-            stream = yt.streams.filter(file_extension="mp4").order_by("resolution").last()
-
-        if not stream:
-            stream = yt.streams.first()
-
-        if not stream:
-            return False
-
-        import tempfile
-        tmp_dir = tempfile.mkdtemp()
-        downloaded = stream.download(output_path=tmp_dir)
-        os.rename(downloaded, video_path)
-        return True
-
+        if stream:
+            import tempfile
+            tmp_dir = tempfile.mkdtemp()
+            downloaded = stream.download(output_path=tmp_dir)
+            os.rename(downloaded, video_path)
+            if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+                print("pytubefix success ✅")
+                return True
     except Exception as e:
         print(f"pytubefix error: {e}")
-        return False
+
+    return False
 
 
 def get_transcript(url: str) -> list:
@@ -203,27 +239,7 @@ def process_video(url: str, job_id: str):
         # Try pytubefix first
         success = download_video(url, video_path)
 
-        # Fallback to yt-dlp with cookies
-        if not success or not os.path.exists(video_path):
-            print("pytubefix failed, trying yt-dlp fallback...")
-            cmd = [
-                "yt-dlp",
-                "-f", "best[height<=720]/best",
-                "--merge-output-format", "mp4",
-                "--no-check-certificates",
-                "--extractor-args", "youtube:player_client=ios",
-                "--no-playlist",
-                "-o", video_path,
-                url,
-            ]
-            if os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
-                cmd += ["--cookies", COOKIES_PATH]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            print(f"yt-dlp stdout: {result.stdout[-500:]}")
-            print(f"yt-dlp stderr: {result.stderr[-500:]}")
-
-        if not os.path.exists(video_path):
+        if not os.path.exists(video_path) or not success:
             update_job(job_id, {"status": "error", "error": "Video download failed. Try a different URL."})
             return
 
