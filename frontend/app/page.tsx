@@ -1,7 +1,6 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
-// FIX: trailing slash remove kiya — Railway pe double slash se 404 aata tha
 const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000").replace(/\/$/, "");
 
 interface Clip {
@@ -60,6 +59,9 @@ export default function Home() {
   const [dots, setDots] = useState("");
   const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [liveLogs, setLiveLogs] = useState<string[]>([]);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     const raw = localStorage.getItem("yt_sessions");
@@ -72,17 +74,92 @@ export default function Home() {
     return () => clearInterval(t);
   }, [loading]);
 
+  // Auto scroll logs to bottom
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [liveLogs]);
+
   const saveSessions = (sessions: SavedSession[]) => {
     setSavedSessions(sessions);
     localStorage.setItem("yt_sessions", JSON.stringify(sessions));
+  };
+
+  const startSSE = (jobId: string, videoUrl: string) => {
+    // Pehla SSE band karo agar chal raha ho
+    if (esRef.current) esRef.current.close();
+
+    const es = new EventSource(`${BACKEND_URL}/logs/${jobId}`);
+    esRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "log") {
+          setLiveLogs(prev => [...prev, data.message]);
+        }
+
+        if (data.type === "status") {
+          setStatus(prev => prev ? {
+            ...prev,
+            status: data.status,
+            progress: data.progress,
+          } : { status: data.status, progress: data.progress, clips: [] });
+        }
+
+        if (data.type === "done") {
+          es.close();
+          setLoading(false);
+
+          if (data.status === "done") {
+            const finalStatus: JobStatus = {
+              status: "done",
+              progress: 100,
+              clips: data.clips,
+              thumbnail: data.thumbnail,
+            };
+            setStatus(finalStatus);
+
+            const newSession: SavedSession = {
+              id: jobId,
+              url: videoUrl,
+              clips: data.clips,
+              thumbnail: data.thumbnail,
+              createdAt: Date.now(),
+            };
+            setSavedSessions(prev => {
+              const updated = [newSession, ...prev.filter(s => s.id !== jobId)].slice(0, 10);
+              localStorage.setItem("yt_sessions", JSON.stringify(updated));
+              return updated;
+            });
+          } else {
+            setStatus({ status: "error", progress: 0, clips: [], error: data.error || "Kuch toh gadbad hai" });
+          }
+        }
+
+        if (data.type === "error") {
+          es.close();
+          setLoading(false);
+          setStatus({ status: "error", progress: 0, clips: [], error: data.message });
+        }
+      } catch {
+        // parse error ignore karo
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      setLoading(false);
+    };
   };
 
   const handleSubmit = async () => {
     if (!url.trim()) return;
     setLoading(true);
     setStatus(null);
+    setLiveLogs([]);
+
     try {
-      // FIX: AbortController se 10s timeout — warna forever hang karta tha
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
 
@@ -94,15 +171,16 @@ export default function Home() {
       });
       clearTimeout(timeout);
 
-      if (!res.ok) {
-        throw new Error(`Server error: ${res.status} ${res.statusText}`);
-      }
+      if (!res.ok) throw new Error(`Server error: ${res.status} ${res.statusText}`);
 
       const data = await res.json();
       setCurrentSessionId(data.job_id);
-      pollStatus(data.job_id, url);
+      setStatus({ status: "queued", progress: 0, clips: [] });
+
+      // SSE shuru karo
+      startSSE(data.job_id, url);
+
     } catch (err: unknown) {
-      // FIX: Specific error messages — pehle sirf generic tha
       let msg = "Backend se connect nahi ho pa raha";
       if (err instanceof Error) {
         if (err.name === "AbortError") {
@@ -116,43 +194,6 @@ export default function Home() {
       setStatus({ status: "error", progress: 0, clips: [], error: msg });
       setLoading(false);
     }
-  };
-
-  const pollStatus = (id: string, videoUrl: string) => {
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`${BACKEND_URL}/status/${id}`);
-        if (!res.ok) {
-          clearInterval(interval);
-          setLoading(false);
-          setStatus({ status: "error", progress: 0, clips: [], error: `Status fetch failed: ${res.status}` });
-          return;
-        }
-        const data: JobStatus = await res.json();
-        setStatus(data);
-        if (data.status === "done") {
-          clearInterval(interval);
-          setLoading(false);
-          const newSession: SavedSession = {
-            id,
-            url: videoUrl,
-            clips: data.clips,
-            thumbnail: data.thumbnail,
-            createdAt: Date.now(),
-          };
-          const updated = [newSession, ...savedSessions.filter(s => s.id !== id)].slice(0, 10);
-          saveSessions(updated);
-        }
-        if (data.status === "error") {
-          clearInterval(interval);
-          setLoading(false);
-        }
-      } catch {
-        clearInterval(interval);
-        setLoading(false);
-        setStatus({ status: "error", progress: 0, clips: [], error: "Polling mein connection toot gaya — backend check karo." });
-      }
-    }, 3000);
   };
 
   const deleteSession = (id: string) => {
@@ -219,8 +260,8 @@ export default function Home() {
           letter-spacing: -0.5px; color: #fff;
         }
         .tagline {
-          color: #666; font-size: 14px;
           font-weight: 300; padding-left: 62px;
+          color: #555; font-size: 14px;
         }
 
         .card {
@@ -308,6 +349,35 @@ export default function Home() {
         .step-text { color: #555; }
         .step.done .step-text { color: #888; }
         .step.active .step-text { color: #f0f0f0; }
+
+        /* Live Logs Terminal */
+        .logs-box {
+          margin-top: 16px;
+          background: #0d0d0d;
+          border: 1px solid #1e1e1e;
+          border-radius: 12px;
+          padding: 14px 16px;
+          max-height: 180px;
+          overflow-y: auto;
+          font-family: 'Courier New', monospace;
+          font-size: 12px;
+        }
+        .logs-box::-webkit-scrollbar { width: 4px; }
+        .logs-box::-webkit-scrollbar-track { background: transparent; }
+        .logs-box::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 99px; }
+        .log-line {
+          color: #555;
+          padding: 2px 0;
+          line-height: 1.6;
+          border-bottom: 1px solid #111;
+        }
+        .log-line:last-child { border-bottom: none; color: #aaa; }
+        .log-line.error { color: #ef4444; }
+        .logs-title {
+          font-size: 11px; color: #333;
+          text-transform: uppercase; letter-spacing: 1px;
+          margin-bottom: 8px; font-family: 'DM Sans', sans-serif;
+        }
 
         .clips-header {
           font-family: 'Syne', sans-serif;
@@ -416,8 +486,6 @@ export default function Home() {
         }
         .error-title { color: #ef4444; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
         .error-msg { color: #666; font-size: 13px; line-height: 1.5; }
-
-        /* FIX: Backend URL debug info */
         .debug-url {
           font-size: 11px; color: #333;
           margin-top: 8px; font-family: monospace;
@@ -493,6 +561,19 @@ export default function Home() {
                     );
                   })}
                 </div>
+
+                {/* Live Logs Terminal */}
+                {liveLogs.length > 0 && (
+                  <div className="logs-box">
+                    <div className="logs-title">🖥 Live Logs</div>
+                    {liveLogs.map((log, i) => (
+                      <div key={i} className={`log-line ${log.includes("❌") ? "error" : ""}`}>
+                        {log}
+                      </div>
+                    ))}
+                    <div ref={logsEndRef} />
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -527,7 +608,6 @@ export default function Home() {
             <div className="error-box">
               <div className="error-title">❌ Error aaya bhai</div>
               <div className="error-msg">{status.error || "Kuch toh gadbad hai"}</div>
-              {/* FIX: Backend URL show karo taaki debug easy ho */}
               <div className="debug-url">Backend: {BACKEND_URL}</div>
             </div>
           )}
