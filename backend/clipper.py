@@ -2,12 +2,26 @@ import subprocess
 import os
 import json
 import re
+import base64
 import requests
 from storage import update_job, upload_clip
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
+COOKIES_PATH = "/tmp/yt_cookies.txt"
+
+
+def _setup_cookies():
+    """Inject cookies from env variable into file"""
+    cookies_b64 = os.environ.get("YT_COOKIES_B64")
+    if cookies_b64:
+        try:
+            with open(COOKIES_PATH, "wb") as f:
+                f.write(base64.b64decode(cookies_b64))
+            print("Cookies loaded ✅")
+        except Exception as e:
+            print(f"Cookies setup failed: {e}")
 
 
 def download_video(url: str, video_path: str) -> bool:
@@ -16,7 +30,6 @@ def download_video(url: str, video_path: str) -> bool:
         from pytubefix import YouTube
         yt = YouTube(url)
 
-        # Try progressive (audio+video combined) first
         stream = (
             yt.streams
             .filter(progressive=True, file_extension="mp4")
@@ -24,18 +37,15 @@ def download_video(url: str, video_path: str) -> bool:
             .last()
         )
 
-        # Fallback to any mp4
         if not stream:
             stream = yt.streams.filter(file_extension="mp4").order_by("resolution").last()
 
-        # Last resort — any stream
         if not stream:
             stream = yt.streams.first()
 
         if not stream:
             return False
 
-        # pytubefix downloads to a folder — we rename to exact path
         import tempfile
         tmp_dir = tempfile.mkdtemp()
         downloaded = stream.download(output_path=tmp_dir)
@@ -51,17 +61,21 @@ def get_transcript(url: str) -> list:
     """Get transcript using yt-dlp subtitles (skip-download mode)"""
     try:
         subtitle_path = f"/tmp/subs_{os.path.basename(url)[-10:]}"
-        result = subprocess.run([
+        cmd = [
             "yt-dlp",
             "--write-auto-sub",
             "--write-sub",
             "--sub-lang", "en",
             "--sub-format", "json3",
             "--skip-download",
-            "--extractor-args", "youtube:player_client=android",
+            "--extractor-args", "youtube:player_client=ios",
             "-o", subtitle_path,
             url
-        ], capture_output=True, text=True, timeout=120)
+        ]
+        if os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
+            cmd += ["--cookies", COOKIES_PATH]
+
+        subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
         sub_file = None
         for f in os.listdir("/tmp"):
@@ -179,6 +193,9 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
 def process_video(url: str, job_id: str):
     """Main pipeline: download → subtitles → AI → cut → upload"""
     try:
+        # Setup cookies at start
+        _setup_cookies()
+
         update_job(job_id, {"status": "downloading", "progress": 10})
 
         video_path = f"/tmp/{job_id}.mp4"
@@ -186,7 +203,7 @@ def process_video(url: str, job_id: str):
         # Try pytubefix first
         success = download_video(url, video_path)
 
-        # Fallback to yt-dlp if pytubefix fails
+        # Fallback to yt-dlp with cookies
         if not success or not os.path.exists(video_path):
             print("pytubefix failed, trying yt-dlp fallback...")
             cmd = [
@@ -194,11 +211,17 @@ def process_video(url: str, job_id: str):
                 "-f", "best[height<=720]/best",
                 "--merge-output-format", "mp4",
                 "--no-check-certificates",
-                "--extractor-args", "youtube:player_client=android,ios",
+                "--extractor-args", "youtube:player_client=ios",
+                "--no-playlist",
                 "-o", video_path,
                 url,
             ]
+            if os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
+                cmd += ["--cookies", COOKIES_PATH]
+
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            print(f"yt-dlp stdout: {result.stdout[-500:]}")
+            print(f"yt-dlp stderr: {result.stderr[-500:]}")
 
         if not os.path.exists(video_path):
             update_job(job_id, {"status": "error", "error": "Video download failed. Try a different URL."})
