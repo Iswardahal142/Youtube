@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g n && n lts
+RUN ln -sf $(which node) /usr/local/bin/node || true
 
 RUN pip install --upgrade pip setuptools wheel
 RUN pip install yt-dlp && pip install --upgrade yt-dlp
