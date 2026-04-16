@@ -1,4 +1,8 @@
-import subprocess
+curl --request GET \
+	--url 'https://youtube-media-downloader.p.rapidapi.com/v2/channel/posts?channelId=UCY2ekMrWhsUVHwO3J3-PCzQ' \
+	--header 'Content-Type: application/json' \
+	--header 'x-rapidapi-host: youtube-media-downloader.p.rapidapi.com' \
+	--header 'x-rapidapi-key: b7ff3f4212mshd3import subprocess
 import os
 import json
 import re
