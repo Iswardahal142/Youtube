@@ -8,15 +8,49 @@ from storage import update_job, upload_clip
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
-COOKIES_PATH = "/tmp/yt_cookies.txt"
 
 
-def get_transcript(video_path: str, url: str) -> list:
-    """Get transcript using YouTube subtitles (no Whisper needed)"""
+def download_video(url: str, video_path: str) -> bool:
+    """Download video using pytubefix — no JS challenge issues"""
     try:
-        # Try YouTube auto-subtitles first
-        subtitle_path = f"/tmp/subs_{os.path.basename(video_path)}"
-        cookies_args = ["--cookies", COOKIES_PATH] if os.path.exists(COOKIES_PATH) else []
+        from pytubefix import YouTube
+        yt = YouTube(url)
+
+        # Try progressive (audio+video combined) first
+        stream = (
+            yt.streams
+            .filter(progressive=True, file_extension="mp4")
+            .order_by("resolution")
+            .last()
+        )
+
+        # Fallback to any mp4
+        if not stream:
+            stream = yt.streams.filter(file_extension="mp4").order_by("resolution").last()
+
+        # Last resort — any stream
+        if not stream:
+            stream = yt.streams.first()
+
+        if not stream:
+            return False
+
+        # pytubefix downloads to a folder — we rename to exact path
+        import tempfile
+        tmp_dir = tempfile.mkdtemp()
+        downloaded = stream.download(output_path=tmp_dir)
+        os.rename(downloaded, video_path)
+        return True
+
+    except Exception as e:
+        print(f"pytubefix error: {e}")
+        return False
+
+
+def get_transcript(url: str) -> list:
+    """Get transcript using yt-dlp subtitles (skip-download mode)"""
+    try:
+        subtitle_path = f"/tmp/subs_{os.path.basename(url)[-10:]}"
         result = subprocess.run([
             "yt-dlp",
             "--write-auto-sub",
@@ -24,12 +58,11 @@ def get_transcript(video_path: str, url: str) -> list:
             "--sub-lang", "en",
             "--sub-format", "json3",
             "--skip-download",
-            *cookies_args,
+            "--extractor-args", "youtube:player_client=android",
             "-o", subtitle_path,
             url
         ], capture_output=True, text=True, timeout=120)
 
-        # Find downloaded subtitle file
         sub_file = None
         for f in os.listdir("/tmp"):
             if f.startswith(os.path.basename(subtitle_path)) and f.endswith(".json3"):
@@ -39,7 +72,7 @@ def get_transcript(video_path: str, url: str) -> list:
         if sub_file and os.path.exists(sub_file):
             with open(sub_file) as f:
                 data = json.load(f)
-            
+
             segments = []
             for event in data.get("events", []):
                 start_ms = event.get("tStartMs", 0)
@@ -56,17 +89,15 @@ def get_transcript(video_path: str, url: str) -> list:
     except Exception as e:
         print(f"Subtitle error: {e}")
 
-    # Fallback: return empty (AI will use evenly spaced clips)
     return []
+
 
 def find_best_moments(segments: list, video_duration: int = 3600) -> list:
     """Use OpenRouter AI to find top 10 most interesting moments"""
     if not segments:
-        # No transcript — return evenly spaced clips
         step = video_duration // TOP_N_CLIPS
         return [{"start": i * step, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
 
-    # Build transcript text with timestamps
     transcript_text = ""
     for seg in segments:
         start = int(seg.get("start", 0))
@@ -106,14 +137,13 @@ Transcript:
             timeout=60
         )
         content = response.json()["choices"][0]["message"]["content"]
-        
-        # Clean JSON
         content = re.sub(r"```json|```", "", content).strip()
         moments = json.loads(content)
         return moments[:TOP_N_CLIPS]
     except Exception as e:
         print(f"AI error: {e}")
         return [{"start": i * 300, "reason": f"Segment {i+1}"} for i in range(TOP_N_CLIPS)]
+
 
 def get_video_duration(video_path: str) -> int:
     """Get video duration in seconds"""
@@ -127,6 +157,7 @@ def get_video_duration(video_path: str) -> int:
         return int(float(result.stdout.strip()))
     except:
         return 3600
+
 
 def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
     """Cut a 60-second clip using FFmpeg"""
@@ -144,45 +175,41 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
     ], capture_output=True, timeout=120)
     return output_path
 
+
 def process_video(url: str, job_id: str):
     """Main pipeline: download → subtitles → AI → cut → upload"""
     try:
         update_job(job_id, {"status": "downloading", "progress": 10})
 
-        # Download video
-        has_cookies = os.path.exists(COOKIES_PATH)  # File mounted via Dockerfile
         video_path = f"/tmp/{job_id}.mp4"
-        cmd = [
-            "yt-dlp",
-            "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "--merge-output-format", "mp4",
-            "--no-check-certificates",
-            "-o", video_path,
-        ]
 
-        # Add cookies if available
-        if has_cookies:
-            cmd += ["--cookies", COOKIES_PATH]
+        # Try pytubefix first
+        success = download_video(url, video_path)
 
-        cmd.append(url)
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # Fallback to yt-dlp if pytubefix fails
+        if not success or not os.path.exists(video_path):
+            print("pytubefix failed, trying yt-dlp fallback...")
+            cmd = [
+                "yt-dlp",
+                "-f", "best[height<=720]/best",
+                "--merge-output-format", "mp4",
+                "--no-check-certificates",
+                "--extractor-args", "youtube:player_client=android,ios",
+                "-o", video_path,
+                url,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if not os.path.exists(video_path):
-            error_detail = result.stderr[-800:] if result.stderr else result.stdout[-800:]
-            update_job(job_id, {"status": "error", "error": f"yt-dlp: {error_detail}"})
+            update_job(job_id, {"status": "error", "error": "Video download failed. Try a different URL."})
             return
 
         duration = get_video_duration(video_path)
 
         update_job(job_id, {"status": "transcribing", "progress": 30})
-
-        # Get transcript via YouTube subtitles
-        segments = get_transcript(video_path, url)
+        segments = get_transcript(url)
 
         update_job(job_id, {"status": "analyzing", "progress": 50})
-
-        # Find best moments with AI
         moments = find_best_moments(segments, duration)
 
         if not moments:
@@ -190,7 +217,6 @@ def process_video(url: str, job_id: str):
 
         update_job(job_id, {"status": "cutting", "progress": 60})
 
-        # Cut clips and upload
         clips = []
         for i, moment in enumerate(moments):
             start = moment.get("start", i * 300)
@@ -211,7 +237,6 @@ def process_video(url: str, job_id: str):
 
                 os.remove(clip_path)
 
-        # Cleanup video
         if os.path.exists(video_path):
             os.remove(video_path)
 
