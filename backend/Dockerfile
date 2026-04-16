@@ -17,7 +17,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY yt_cookies.txt /tmp/yt_cookies.txt 2>/dev/null || true
+RUN touch /tmp/yt_cookies.txt
 
 COPY . .
 
