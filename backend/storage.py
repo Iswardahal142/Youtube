@@ -6,9 +6,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 BUCKET_NAME = "yt-clipper"
 
-# Redis-backed job store (falls back to in-memory if Redis not configured)
 _redis_client = None
 _memory_jobs = {}
+_memory_logs = {}  # job_id -> [log messages]
 
 def _get_redis():
     global _redis_client
@@ -30,9 +30,11 @@ def init_job(job_id: str):
     data = {"status": "queued", "progress": 0, "clips": []}
     r = _get_redis()
     if r:
-        r.setex(f"job:{job_id}", 86400, json.dumps(data))  # 24hr TTL
+        r.setex(f"job:{job_id}", 86400, json.dumps(data))
+        r.delete(f"logs:{job_id}")  # purane logs clear karo
     else:
         _memory_jobs[job_id] = data
+        _memory_logs[job_id] = []
 
 def update_job(job_id: str, updates: dict):
     r = _get_redis()
@@ -45,6 +47,25 @@ def update_job(job_id: str, updates: dict):
         if job_id in _memory_jobs:
             _memory_jobs[job_id].update(updates)
     print(f"Job {job_id}: {updates}")
+
+def add_log(job_id: str, message: str):
+    """Live log message add karo — SSE se frontend pe jayega"""
+    print(f"[LOG] {job_id}: {message}")
+    r = _get_redis()
+    if r:
+        r.rpush(f"logs:{job_id}", message)
+        r.expire(f"logs:{job_id}", 86400)
+    else:
+        if job_id not in _memory_logs:
+            _memory_logs[job_id] = []
+        _memory_logs[job_id].append(message)
+
+def get_job_logs(job_id: str) -> list:
+    """Saare logs return karo"""
+    r = _get_redis()
+    if r:
+        return r.lrange(f"logs:{job_id}", 0, -1)
+    return _memory_logs.get(job_id, [])
 
 def get_job_status(job_id: str):
     r = _get_redis()
@@ -70,7 +91,6 @@ def upload_clip(clip_path: str, job_id: str, index: int) -> str:
             )
 
         url = supabase.storage.from_(BUCKET_NAME).get_public_url(file_name)
-        # ?download= lagane se browser HTML nahi balki MP4 download karega
         url = url + "?download=" + f"clip_{index+1}.mp4"
         return url
     except Exception as e:
