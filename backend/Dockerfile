@@ -6,13 +6,10 @@ RUN apt-get update && apt-get install -y \
     nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g n
-RUN n lts
+RUN npm install -g n && n lts
 
 RUN pip install --upgrade pip setuptools wheel
-RUN pip install yt-dlp
-RUN pip install --upgrade yt-dlp
-
+RUN pip install yt-dlp && pip install --upgrade yt-dlp
 RUN yt-dlp --install-deps 2>/dev/null || true
 
 WORKDIR /app
@@ -20,7 +17,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY yt_cookies.txt /tmp/yt_cookies.txt
+COPY yt_cookies.txt /tmp/yt_cookies.txt 2>/dev/null || true
+
 COPY . .
 
 EXPOSE 8000
