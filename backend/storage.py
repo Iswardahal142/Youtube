@@ -70,6 +70,8 @@ def upload_clip(clip_path: str, job_id: str, index: int) -> str:
             )
 
         url = supabase.storage.from_(BUCKET_NAME).get_public_url(file_name)
+        # ?download= lagane se browser HTML nahi balki MP4 download karega
+        url = url + "?download=" + f"clip_{index+1}.mp4"
         return url
     except Exception as e:
         print(f"Upload error: {e}")
