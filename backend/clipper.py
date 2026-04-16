@@ -1,8 +1,4 @@
-curl --request GET \
-	--url 'https://youtube-media-downloader.p.rapidapi.com/v2/channel/posts?channelId=UCY2ekMrWhsUVHwO3J3-PCzQ' \
-	--header 'Content-Type: application/json' \
-	--header 'x-rapidapi-host: youtube-media-downloader.p.rapidapi.com' \
-	--header 'x-rapidapi-key: b7ff3f4212mshd3import subprocess
+import subprocess
 import os
 import json
 import re
@@ -11,90 +7,68 @@ import requests
 from storage import update_job, upload_clip
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
 COOKIES_PATH = "/tmp/yt_cookies.txt"
 
 
-def _setup_cookies():
-    """Inject cookies from env variable into file"""
-    cookies_b64 = os.environ.get("YT_COOKIES_B64")
-    if cookies_b64:
-        try:
-            with open(COOKIES_PATH, "wb") as f:
-                f.write(base64.b64decode(cookies_b64))
-            print("Cookies loaded ✅")
-        except Exception as e:
-            print(f"Cookies setup failed: {e}")
-
-
 def download_video(url: str, video_path: str) -> bool:
-    """Download video using yt-dlp with multiple client fallbacks"""
-
-    cookies_args = []
-    if os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
-        cookies_args = ["--cookies", COOKIES_PATH]
-
-    # Different player_client strategies to try
-    strategies = [
-        # Strategy 1: tv_embedded — most reliable on servers
-        ["--extractor-args", "youtube:player_client=tv_embedded"],
-        # Strategy 2: web + po_token workaround
-        ["--extractor-args", "youtube:player_client=web"],
-        # Strategy 3: mweb (mobile web)
-        ["--extractor-args", "youtube:player_client=mweb"],
-        # Strategy 4: no extractor args — default
-        [],
-    ]
-
-    base_cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--no-check-certificates",
-        "--no-playlist",
-        "--socket-timeout", "30",
-        "--retries", "3",
-        "-o", video_path,
-    ] + cookies_args
-
-    for i, strategy in enumerate(strategies):
-        try:
-            cmd = base_cmd + strategy + [url]
-            print(f"Download attempt {i+1} with strategy: {strategy}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            print(f"stdout: {result.stdout[-300:]}")
-            print(f"stderr: {result.stderr[-300:]}")
-            if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
-                print(f"Download success on attempt {i+1} ✅")
-                return True
-        except Exception as e:
-            print(f"Strategy {i+1} failed: {e}")
-
-    # Last resort: pytubefix
+    """Download video using RapidAPI (no cookies needed)"""
     try:
-        print("Trying pytubefix as last resort...")
-        from pytubefix import YouTube
-        from pytubefix.cli import on_progress
-        yt = YouTube(url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
-        stream = (
-            yt.streams.filter(progressive=True, file_extension="mp4")
-            .order_by("resolution").last()
-            or yt.streams.filter(file_extension="mp4").order_by("resolution").last()
-            or yt.streams.first()
-        )
-        if stream:
-            import tempfile
-            tmp_dir = tempfile.mkdtemp()
-            downloaded = stream.download(output_path=tmp_dir)
-            os.rename(downloaded, video_path)
-            if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
-                print("pytubefix success ✅")
-                return True
-    except Exception as e:
-        print(f"pytubefix error: {e}")
+        # Video ID nikalo URL se
+        video_id = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
+        if not video_id:
+            print("Video ID nahi mila URL se")
+            return False
+        video_id = video_id.group(1)
+        print(f"Video ID: {video_id}")
 
-    return False
+        # RapidAPI se video details lo
+        response = requests.get(
+            "https://youtube-media-downloader.p.rapidapi.com/v2/video/details",
+            headers={
+                "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com",
+                "x-rapidapi-key": RAPIDAPI_KEY
+            },
+            params={"videoId": video_id},
+            timeout=30
+        )
+        data = response.json()
+        print(f"RapidAPI response status: {response.status_code}")
+
+        # Best mp4 video URL nikalo (max 720p)
+        videos = data.get("videos", {}).get("items", [])
+        mp4_videos = [
+            v for v in videos
+            if v.get("extension") == "mp4" and v.get("height", 0) <= 720
+        ]
+
+        if not mp4_videos:
+            print("Koi MP4 video nahi mila RapidAPI se")
+            return False
+
+        best = sorted(mp4_videos, key=lambda x: x.get("height", 0), reverse=True)[0]
+        download_url = best.get("url")
+        print(f"Download URL mila: {best.get('height')}p")
+
+        # File download karo stream mein
+        with requests.get(download_url, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            with open(video_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+            print("RapidAPI download success ✅")
+            return True
+        else:
+            print("File download hui par empty hai")
+            return False
+
+    except Exception as e:
+        print(f"RapidAPI download error: {e}")
+        return False
 
 
 def get_transcript(url: str) -> list:
@@ -112,8 +86,6 @@ def get_transcript(url: str) -> list:
             "-o", subtitle_path,
             url
         ]
-        if os.path.exists(COOKIES_PATH) and os.path.getsize(COOKIES_PATH) > 0:
-            cmd += ["--cookies", COOKIES_PATH]
 
         subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
@@ -233,14 +205,10 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
 def process_video(url: str, job_id: str):
     """Main pipeline: download → subtitles → AI → cut → upload"""
     try:
-        # Setup cookies at start
-        _setup_cookies()
-
         update_job(job_id, {"status": "downloading", "progress": 10})
 
         video_path = f"/tmp/{job_id}.mp4"
 
-        # Try pytubefix first
         success = download_video(url, video_path)
 
         if not os.path.exists(video_path) or not success:
@@ -250,9 +218,9 @@ def process_video(url: str, job_id: str):
         # Thumbnail URL fetch karo
         thumbnail_url = ""
         try:
-            from pytubefix import YouTube
-            yt = YouTube(url)
-            thumbnail_url = yt.thumbnail_url or ""
+            video_id = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
+            if video_id:
+                thumbnail_url = f"https://img.youtube.com/vi/{video_id.group(1)}/hqdefault.jpg"
         except Exception as e:
             print(f"Thumbnail fetch error: {e}")
 
