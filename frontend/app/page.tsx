@@ -15,12 +15,14 @@ interface JobStatus {
   progress: number;
   clips: Clip[];
   error?: string;
+  thumbnail?: string;
 }
 
 interface SavedSession {
   id: string;
   url: string;
   clips: Clip[];
+  thumbnail?: string;
   createdAt: number;
 }
 
@@ -106,6 +108,7 @@ export default function Home() {
             id,
             url: videoUrl,
             clips: data.clips,
+            thumbnail: data.thumbnail,
             createdAt: Date.now(),
           };
           const updated = [newSession, ...savedSessions.filter(s => s.id !== id)].slice(0, 10);
@@ -387,6 +390,23 @@ export default function Home() {
         .error-title { color: #ef4444; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
         .error-msg { color: #666; font-size: 13px; line-height: 1.5; }
 
+        .thumbnail-img {
+          width: 100%; border-radius: 12px;
+          margin-bottom: 16px;
+          object-fit: cover; max-height: 200px;
+          border: 1px solid #222;
+        }
+        .thumbnail-img {
+          width: 100%; border-radius: 12px;
+          margin-bottom: 16px;
+          object-fit: cover; max-height: 200px;
+          border: 1px solid #222;
+        }
+        .history-thumb {
+          width: 100%; border-radius: 8px;
+          margin-bottom: 10px; object-fit: cover;
+          max-height: 120px; border: 1px solid #1e1e1e;
+        }
         .hint {
           text-align: center; color: #2a2a2a;
           font-size: 12px; margin-top: 32px;
@@ -459,6 +479,13 @@ export default function Home() {
                 ✅ Clips Ready
                 <span className="clip-count">{status.clips.length} clips</span>
               </div>
+              {status.thumbnail && (
+                <img
+                  src={status.thumbnail}
+                  alt="Video thumbnail"
+                  className="thumbnail-img"
+                />
+              )}
               <div className="clip-list">
                 {status.clips.map(clip => (
                   <div key={clip.index} className="clip-item">
@@ -499,6 +526,13 @@ export default function Home() {
                   <div className="history-url">🔗 {getShortUrl(session.url)}</div>
                   <button className="del-btn" onClick={() => deleteSession(session.id)}>🗑 Delete</button>
                 </div>
+                {session.thumbnail && (
+                  <img
+                    src={session.thumbnail}
+                    alt="thumbnail"
+                    className="history-thumb"
+                  />
+                )}
                 <div className="history-clips">
                   {session.clips.map(clip => (
                     <div key={clip.index} className="history-clip">
