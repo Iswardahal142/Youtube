@@ -1,7 +1,8 @@
 "use client";
 import { useState, useEffect } from "react";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+// FIX: trailing slash remove kiya — Railway pe double slash se 404 aata tha
+const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000").replace(/\/$/, "");
 
 interface Clip {
   index: number;
@@ -81,16 +82,38 @@ export default function Home() {
     setLoading(true);
     setStatus(null);
     try {
+      // FIX: AbortController se 10s timeout — warna forever hang karta tha
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
       const res = await fetch(`${BACKEND_URL}/clip`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        throw new Error(`Server error: ${res.status} ${res.statusText}`);
+      }
+
       const data = await res.json();
       setCurrentSessionId(data.job_id);
       pollStatus(data.job_id, url);
-    } catch {
-      setStatus({ status: "error", progress: 0, clips: [], error: "Backend se connect nahi ho pa raha" });
+    } catch (err: unknown) {
+      // FIX: Specific error messages — pehle sirf generic tha
+      let msg = "Backend se connect nahi ho pa raha";
+      if (err instanceof Error) {
+        if (err.name === "AbortError") {
+          msg = "Request timeout — Railway backend slow hai ya asleep. 30 sec baad try karo.";
+        } else if (err.message.includes("Failed to fetch")) {
+          msg = `Backend unreachable: ${BACKEND_URL} — Railway pe service running hai? Check karo.`;
+        } else {
+          msg = err.message;
+        }
+      }
+      setStatus({ status: "error", progress: 0, clips: [], error: msg });
       setLoading(false);
     }
   };
@@ -99,6 +122,12 @@ export default function Home() {
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`${BACKEND_URL}/status/${id}`);
+        if (!res.ok) {
+          clearInterval(interval);
+          setLoading(false);
+          setStatus({ status: "error", progress: 0, clips: [], error: `Status fetch failed: ${res.status}` });
+          return;
+        }
         const data: JobStatus = await res.json();
         setStatus(data);
         if (data.status === "done") {
@@ -121,6 +150,7 @@ export default function Home() {
       } catch {
         clearInterval(interval);
         setLoading(false);
+        setStatus({ status: "error", progress: 0, clips: [], error: "Polling mein connection toot gaya — backend check karo." });
       }
     }, 3000);
   };
@@ -130,7 +160,6 @@ export default function Home() {
     saveSessions(updated);
   };
 
-  // FIX: Direct anchor download — blob se mobile pe screenshot jaisi file aati thi
   const handleDownload = (clipUrl: string, fileName: string) => {
     const a = document.createElement("a");
     a.href = clipUrl;
@@ -229,7 +258,6 @@ export default function Home() {
         .btn:active:not(:disabled) { transform: scale(0.98); }
         .btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
 
-        /* FIX: Progress section ab card ke andar hi hai, alag card nahi */
         .progress-section {
           margin-top: 20px;
           padding-top: 20px;
@@ -325,7 +353,6 @@ export default function Home() {
         }
         .dl-btn:hover { background: #e62222; }
 
-        /* Sidebar */
         .side-title {
           font-family: 'Syne', sans-serif;
           font-size: 16px; font-weight: 700;
@@ -390,12 +417,12 @@ export default function Home() {
         .error-title { color: #ef4444; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
         .error-msg { color: #666; font-size: 13px; line-height: 1.5; }
 
-        .thumbnail-img {
-          width: 100%; border-radius: 12px;
-          margin-bottom: 16px;
-          object-fit: cover; max-height: 200px;
-          border: 1px solid #222;
+        /* FIX: Backend URL debug info */
+        .debug-url {
+          font-size: 11px; color: #333;
+          margin-top: 8px; font-family: monospace;
         }
+
         .thumbnail-img {
           width: 100%; border-radius: 12px;
           margin-bottom: 16px;
@@ -424,7 +451,6 @@ export default function Home() {
             <p className="tagline">Long video → Top 10 Shorts/Reels (60 sec each)</p>
           </div>
 
-          {/* URL Card — progress bhi iske andar hi dikhega */}
           <div className="card">
             <div className="label">YouTube URL</div>
             <div className="input-row">
@@ -441,7 +467,6 @@ export default function Home() {
               </button>
             </div>
 
-            {/* FIX: Progress section URL input ke theek niche */}
             {status && cfg && status.status !== "done" && status.status !== "error" && (
               <div className="progress-section">
                 <div className="status-header">
@@ -472,7 +497,6 @@ export default function Home() {
             )}
           </div>
 
-          {/* Clips list — done hone ke baad alag card mein */}
           {status && status.status === "done" && (
             <div className="card">
               <div className="clips-header">
@@ -480,11 +504,7 @@ export default function Home() {
                 <span className="clip-count">{status.clips.length} clips</span>
               </div>
               {status.thumbnail && (
-                <img
-                  src={status.thumbnail}
-                  alt="Video thumbnail"
-                  className="thumbnail-img"
-                />
+                <img src={status.thumbnail} alt="Video thumbnail" className="thumbnail-img" />
               )}
               <div className="clip-list">
                 {status.clips.map(clip => (
@@ -503,18 +523,19 @@ export default function Home() {
             </div>
           )}
 
-          {/* Error box */}
           {status && status.status === "error" && (
             <div className="error-box">
               <div className="error-title">❌ Error aaya bhai</div>
               <div className="error-msg">{status.error || "Kuch toh gadbad hai"}</div>
+              {/* FIX: Backend URL show karo taaki debug easy ho */}
+              <div className="debug-url">Backend: {BACKEND_URL}</div>
             </div>
           )}
 
           <div className="hint">Processing time: ~5-10 min per video</div>
         </div>
 
-        {/* Sidebar - Old Sessions */}
+        {/* Sidebar */}
         <div className="side-col">
           <div className="side-title">🕘 Purani Clips</div>
           {oldSessions.length === 0 ? (
@@ -527,11 +548,7 @@ export default function Home() {
                   <button className="del-btn" onClick={() => deleteSession(session.id)}>🗑 Delete</button>
                 </div>
                 {session.thumbnail && (
-                  <img
-                    src={session.thumbnail}
-                    alt="thumbnail"
-                    className="history-thumb"
-                  />
+                  <img src={session.thumbnail} alt="thumbnail" className="history-thumb" />
                 )}
                 <div className="history-clips">
                   {session.clips.map(clip => (
