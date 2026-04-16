@@ -17,15 +17,22 @@ interface JobStatus {
   error?: string;
 }
 
+interface SavedSession {
+  id: string;
+  url: string;
+  clips: Clip[];
+  createdAt: number;
+}
+
 const statusConfig: Record<string, { label: string; icon: string; color: string }> = {
-  queued:      { label: "Queue mein hai",           icon: "⏳", color: "#f59e0b" },
-  downloading: { label: "Video download ho rahi",   icon: "⬇️", color: "#3b82f6" },
-  transcribing:{ label: "Transcript ban raha hai",  icon: "🎙️", color: "#8b5cf6" },
-  analyzing:   { label: "AI moments dhundh raha",   icon: "🤖", color: "#ec4899" },
-  cutting:     { label: "Clips cut ho rahi hain",   icon: "✂️", color: "#f97316" },
-  uploading:   { label: "Supabase pe upload",       icon: "☁️", color: "#06b6d4" },
-  done:        { label: "Clips ready hain!",        icon: "✅", color: "#22c55e" },
-  error:       { label: "Error aaya",               icon: "❌", color: "#ef4444" },
+  queued:       { label: "Queue mein hai",          icon: "⏳", color: "#f59e0b" },
+  downloading:  { label: "Video download ho rahi",  icon: "⬇️", color: "#3b82f6" },
+  transcribing: { label: "Transcript ban raha hai", icon: "🎙️", color: "#8b5cf6" },
+  analyzing:    { label: "AI moments dhundh raha",  icon: "🤖", color: "#ec4899" },
+  cutting:      { label: "Clips cut ho rahi hain",  icon: "✂️", color: "#f97316" },
+  uploading:    { label: "Supabase pe upload",      icon: "☁️", color: "#06b6d4" },
+  done:         { label: "Clips ready hain!",       icon: "✅", color: "#22c55e" },
+  error:        { label: "Error aaya",              icon: "❌", color: "#ef4444" },
 };
 
 function formatTime(seconds: number) {
@@ -34,17 +41,39 @@ function formatTime(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function getShortUrl(url: string) {
+  try {
+    const u = new URL(url);
+    return u.hostname + u.pathname.slice(0, 20);
+  } catch {
+    return url.slice(0, 30);
+  }
+}
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [dots, setDots] = useState("");
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+
+  // Load saved sessions from localStorage
+  useEffect(() => {
+    const raw = localStorage.getItem("yt_sessions");
+    if (raw) setSavedSessions(JSON.parse(raw));
+  }, []);
 
   useEffect(() => {
     if (!loading) return;
     const t = setInterval(() => setDots(d => d.length >= 3 ? "" : d + "."), 500);
     return () => clearInterval(t);
   }, [loading]);
+
+  const saveSessions = (sessions: SavedSession[]) => {
+    setSavedSessions(sessions);
+    localStorage.setItem("yt_sessions", JSON.stringify(sessions));
+  };
 
   const handleSubmit = async () => {
     if (!url.trim()) return;
@@ -57,20 +86,34 @@ export default function Home() {
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      pollStatus(data.job_id);
+      setCurrentSessionId(data.job_id);
+      pollStatus(data.job_id, url);
     } catch {
       setStatus({ status: "error", progress: 0, clips: [], error: "Backend se connect nahi ho pa raha" });
       setLoading(false);
     }
   };
 
-  const pollStatus = (id: string) => {
+  const pollStatus = (id: string, videoUrl: string) => {
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`${BACKEND_URL}/status/${id}`);
         const data: JobStatus = await res.json();
         setStatus(data);
-        if (data.status === "done" || data.status === "error") {
+        if (data.status === "done") {
+          clearInterval(interval);
+          setLoading(false);
+          // Save to history
+          const newSession: SavedSession = {
+            id,
+            url: videoUrl,
+            clips: data.clips,
+            createdAt: Date.now(),
+          };
+          const updated = [newSession, ...savedSessions.filter(s => s.id !== id)].slice(0, 10);
+          saveSessions(updated);
+        }
+        if (data.status === "error") {
           clearInterval(interval);
           setLoading(false);
         }
@@ -81,15 +124,33 @@ export default function Home() {
     }, 3000);
   };
 
+  const deleteSession = (id: string) => {
+    const updated = savedSessions.filter(s => s.id !== id);
+    saveSessions(updated);
+  };
+
+  const handleDownload = async (clipUrl: string, fileName: string) => {
+    try {
+      const res = await fetch(clipUrl);
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      window.open(clipUrl, "_blank");
+    }
+  };
+
   const cfg = status ? statusConfig[status.status] : null;
+  const oldSessions = savedSessions.filter(s => s.id !== currentSessionId);
 
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap');
-
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
         body {
           font-family: 'DM Sans', sans-serif;
           background: #0a0a0a;
@@ -97,165 +158,115 @@ export default function Home() {
           min-height: 100vh;
         }
 
-        .wrap {
-          max-width: 680px;
+        .layout {
+          display: flex;
+          gap: 24px;
+          max-width: 1200px;
           margin: 0 auto;
           padding: 48px 24px 80px;
+          align-items: flex-start;
         }
 
-        /* Header */
-        .header {
-          margin-bottom: 48px;
+        .main-col { flex: 1; min-width: 0; }
+        .side-col { width: 320px; flex-shrink: 0; }
+
+        @media (max-width: 768px) {
+          .layout { flex-direction: column; padding: 24px 16px 60px; }
+          .side-col { width: 100%; }
         }
+
+        .header { margin-bottom: 32px; }
         .logo {
-          display: flex;
-          align-items: center;
-          gap: 14px;
-          margin-bottom: 10px;
+          display: flex; align-items: center;
+          gap: 14px; margin-bottom: 10px;
         }
         .logo-icon {
           width: 48px; height: 48px;
-          background: #ff2d2d;
-          border-radius: 14px;
+          background: #ff2d2d; border-radius: 14px;
           display: flex; align-items: center; justify-content: center;
           font-size: 22px;
         }
         .logo h1 {
           font-family: 'Syne', sans-serif;
-          font-size: 28px;
-          font-weight: 800;
-          letter-spacing: -0.5px;
-          color: #fff;
+          font-size: 28px; font-weight: 800;
+          letter-spacing: -0.5px; color: #fff;
         }
         .tagline {
-          color: #666;
-          font-size: 14px;
-          font-weight: 300;
-          letter-spacing: 0.2px;
-          padding-left: 62px;
+          color: #666; font-size: 14px;
+          font-weight: 300; padding-left: 62px;
         }
 
-        /* Input card */
         .card {
-          background: #111;
-          border: 1px solid #222;
-          border-radius: 20px;
-          padding: 28px;
-          margin-bottom: 20px;
+          background: #111; border: 1px solid #222;
+          border-radius: 20px; padding: 24px;
+          margin-bottom: 16px;
         }
         .label {
-          font-size: 12px;
-          font-weight: 500;
-          color: #555;
-          text-transform: uppercase;
-          letter-spacing: 1px;
-          margin-bottom: 10px;
+          font-size: 12px; font-weight: 500;
+          color: #555; text-transform: uppercase;
+          letter-spacing: 1px; margin-bottom: 10px;
         }
-        .input-row {
-          display: flex;
-          gap: 10px;
-        }
+        .input-row { display: flex; gap: 10px; }
         input[type="text"] {
-          flex: 1;
-          background: #1a1a1a;
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 14px 18px;
-          font-size: 14px;
+          flex: 1; background: #1a1a1a;
+          border: 1px solid #2a2a2a; border-radius: 12px;
+          padding: 14px 18px; font-size: 14px;
           font-family: 'DM Sans', sans-serif;
-          color: #f0f0f0;
-          outline: none;
+          color: #f0f0f0; outline: none;
           transition: border-color 0.2s;
         }
-        input[type="text"]:focus {
-          border-color: #ff2d2d;
-        }
+        input[type="text"]:focus { border-color: #ff2d2d; }
         input[type="text"]::placeholder { color: #3a3a3a; }
         input[type="text"]:disabled { opacity: 0.5; }
 
         .btn {
-          background: #ff2d2d;
-          color: #fff;
-          border: none;
-          border-radius: 12px;
-          padding: 14px 22px;
-          font-size: 14px;
-          font-weight: 600;
-          font-family: 'DM Sans', sans-serif;
-          cursor: pointer;
-          transition: background 0.2s, transform 0.1s;
+          background: #ff2d2d; color: #fff;
+          border: none; border-radius: 12px;
+          padding: 14px 22px; font-size: 14px;
+          font-weight: 600; font-family: 'DM Sans', sans-serif;
+          cursor: pointer; transition: background 0.2s, transform 0.1s;
           white-space: nowrap;
         }
         .btn:hover:not(:disabled) { background: #e62222; }
         .btn:active:not(:disabled) { transform: scale(0.98); }
         .btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
 
-        /* Status section */
         .status-card {
-          background: #111;
-          border: 1px solid #222;
-          border-radius: 20px;
-          padding: 28px;
-          margin-bottom: 20px;
+          background: #111; border: 1px solid #222;
+          border-radius: 20px; padding: 24px;
+          margin-bottom: 16px;
         }
-
         .status-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          margin-bottom: 20px;
+          display: flex; align-items: center;
+          justify-content: space-between; margin-bottom: 20px;
         }
         .status-label {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          font-size: 15px;
-          font-weight: 500;
+          display: flex; align-items: center;
+          gap: 10px; font-size: 15px; font-weight: 500;
         }
-        .status-icon { font-size: 18px; }
         .status-pct {
           font-family: 'Syne', sans-serif;
-          font-size: 22px;
-          font-weight: 700;
-          color: #ff2d2d;
+          font-size: 22px; font-weight: 700; color: #ff2d2d;
         }
-
         .progress-track {
-          height: 4px;
-          background: #1e1e1e;
-          border-radius: 99px;
-          overflow: hidden;
-          margin-bottom: 28px;
+          height: 4px; background: #1e1e1e;
+          border-radius: 99px; overflow: hidden; margin-bottom: 24px;
         }
         .progress-fill {
-          height: 100%;
-          border-radius: 99px;
+          height: 100%; border-radius: 99px;
           transition: width 0.6s ease;
         }
-
-        /* Steps */
-        .steps {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
+        .steps { display: flex; flex-direction: column; gap: 8px; }
         .step {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          padding: 10px 14px;
-          border-radius: 10px;
-          font-size: 13px;
+          display: flex; align-items: center;
+          gap: 12px; padding: 10px 14px;
+          border-radius: 10px; font-size: 13px;
           transition: background 0.2s;
         }
-        .step.active {
-          background: #1a1a1a;
-        }
+        .step.active { background: #1a1a1a; }
         .step-dot {
-          width: 8px; height: 8px;
-          border-radius: 50%;
-          background: #2a2a2a;
-          flex-shrink: 0;
+          width: 8px; height: 8px; border-radius: 50%;
+          background: #2a2a2a; flex-shrink: 0;
           transition: background 0.3s;
         }
         .step.done .step-dot { background: #22c55e; }
@@ -265,210 +276,247 @@ export default function Home() {
           animation: pulse 1s infinite;
         }
         @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
+          0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
         }
         .step-text { color: #555; }
         .step.done .step-text { color: #888; }
         .step.active .step-text { color: #f0f0f0; }
 
-        /* Clips */
         .clips-header {
           font-family: 'Syne', sans-serif;
-          font-size: 18px;
-          font-weight: 700;
-          color: #22c55e;
-          margin-bottom: 20px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
+          font-size: 18px; font-weight: 700;
+          color: #22c55e; margin-bottom: 16px;
+          display: flex; align-items: center; gap: 8px;
         }
         .clip-count {
-          background: #22c55e22;
-          color: #22c55e;
-          font-size: 12px;
-          font-weight: 600;
-          padding: 3px 10px;
-          border-radius: 99px;
+          background: #22c55e22; color: #22c55e;
+          font-size: 12px; font-weight: 600;
+          padding: 3px 10px; border-radius: 99px;
         }
-
         .clip-list { display: flex; flex-direction: column; gap: 10px; }
         .clip-item {
-          background: #161616;
-          border: 1px solid #222;
-          border-radius: 14px;
-          padding: 16px 18px;
-          display: flex;
-          align-items: center;
-          gap: 14px;
+          background: #161616; border: 1px solid #222;
+          border-radius: 14px; padding: 14px 16px;
+          display: flex; align-items: center; gap: 12px;
           transition: border-color 0.2s;
         }
         .clip-item:hover { border-color: #333; }
         .clip-num {
           width: 32px; height: 32px;
-          background: #ff2d2d22;
-          color: #ff2d2d;
+          background: #ff2d2d22; color: #ff2d2d;
           border-radius: 8px;
           display: flex; align-items: center; justify-content: center;
           font-family: 'Syne', sans-serif;
-          font-weight: 700;
-          font-size: 13px;
-          flex-shrink: 0;
+          font-weight: 700; font-size: 13px; flex-shrink: 0;
         }
         .clip-info { flex: 1; min-width: 0; }
         .clip-reason {
-          font-size: 13px;
-          color: #ccc;
+          font-size: 13px; color: #ccc;
           margin-bottom: 4px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-        .clip-time {
-          font-size: 11px;
-          color: #444;
-        }
+        .clip-time { font-size: 11px; color: #444; }
         .dl-btn {
-          background: #ff2d2d;
-          color: #fff;
-          text-decoration: none;
-          border-radius: 10px;
-          padding: 8px 16px;
-          font-size: 12px;
-          font-weight: 600;
-          font-family: 'DM Sans', sans-serif;
-          transition: background 0.2s;
+          background: #ff2d2d; color: #fff;
+          border: none; border-radius: 10px;
+          padding: 8px 14px; font-size: 12px;
+          font-weight: 600; font-family: 'DM Sans', sans-serif;
+          cursor: pointer; transition: background 0.2s;
           white-space: nowrap;
         }
         .dl-btn:hover { background: #e62222; }
 
-        /* Error */
-        .error-box {
-          background: #1a0a0a;
-          border: 1px solid #3a1515;
-          border-radius: 14px;
-          padding: 20px;
+        /* Sidebar */
+        .side-title {
+          font-family: 'Syne', sans-serif;
+          font-size: 16px; font-weight: 700;
+          color: #fff; margin-bottom: 14px;
+          display: flex; align-items: center; gap: 8px;
         }
-        .error-title {
-          color: #ef4444;
-          font-weight: 600;
-          margin-bottom: 6px;
-          font-size: 14px;
+        .side-empty {
+          color: #333; font-size: 13px;
+          text-align: center; padding: 32px 0;
         }
-        .error-msg {
-          color: #666;
-          font-size: 13px;
-          line-height: 1.5;
+        .history-item {
+          background: #111; border: 1px solid #1e1e1e;
+          border-radius: 14px; padding: 14px 16px;
+          margin-bottom: 10px;
         }
+        .history-top {
+          display: flex; align-items: center;
+          justify-content: space-between; margin-bottom: 8px;
+        }
+        .history-url {
+          font-size: 12px; color: #555;
+          white-space: nowrap; overflow: hidden;
+          text-overflow: ellipsis; flex: 1;
+        }
+        .del-btn {
+          background: #1a0a0a; color: #ef4444;
+          border: 1px solid #3a1515; border-radius: 8px;
+          padding: 4px 10px; font-size: 11px;
+          cursor: pointer; flex-shrink: 0; margin-left: 8px;
+          transition: background 0.2s;
+        }
+        .del-btn:hover { background: #2a1010; }
+        .history-clips {
+          display: flex; flex-direction: column; gap: 6px;
+        }
+        .history-clip {
+          display: flex; align-items: center;
+          gap: 8px; font-size: 12px; color: #666;
+        }
+        .history-clip-num {
+          color: #ff2d2d; font-weight: 700;
+          font-size: 11px; flex-shrink: 0;
+        }
+        .history-clip-text {
+          flex: 1; white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis;
+        }
+        .history-dl {
+          background: transparent; color: #ff2d2d;
+          border: 1px solid #ff2d2d33; border-radius: 6px;
+          padding: 3px 8px; font-size: 10px;
+          cursor: pointer; flex-shrink: 0;
+          transition: background 0.2s;
+        }
+        .history-dl:hover { background: #ff2d2d22; }
 
-        /* Footer hint */
+        .error-box {
+          background: #1a0a0a; border: 1px solid #3a1515;
+          border-radius: 14px; padding: 20px;
+        }
+        .error-title { color: #ef4444; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+        .error-msg { color: #666; font-size: 13px; line-height: 1.5; }
+
         .hint {
-          text-align: center;
-          color: #2a2a2a;
-          font-size: 12px;
-          margin-top: 40px;
+          text-align: center; color: #2a2a2a;
+          font-size: 12px; margin-top: 32px;
         }
       `}</style>
 
-      <div className="wrap">
-        {/* Header */}
-        <div className="header">
-          <div className="logo">
-            <div className="logo-icon">🎬</div>
-            <h1>YT Clipper</h1>
+      <div className="layout">
+        {/* Main Column */}
+        <div className="main-col">
+          <div className="header">
+            <div className="logo">
+              <div className="logo-icon">🎬</div>
+              <h1>YT Clipper</h1>
+            </div>
+            <p className="tagline">Long video → Top 10 Shorts/Reels (60 sec each)</p>
           </div>
-          <p className="tagline">Long video → Top 10 Shorts/Reels (60 sec each)</p>
-        </div>
 
-        {/* Input */}
-        <div className="card">
-          <div className="label">YouTube URL</div>
-          <div className="input-row">
-            <input
-              type="text"
-              placeholder="https://youtube.com/watch?v=..."
-              value={url}
-              onChange={e => setUrl(e.target.value)}
-              disabled={loading}
-              onKeyDown={e => e.key === "Enter" && handleSubmit()}
-            />
-            <button className="btn" onClick={handleSubmit} disabled={loading || !url.trim()}>
-              {loading ? `Processing${dots}` : "🚀 Clip karo"}
-            </button>
+          <div className="card">
+            <div className="label">YouTube URL</div>
+            <div className="input-row">
+              <input
+                type="text"
+                placeholder="https://youtube.com/watch?v=..."
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                disabled={loading}
+                onKeyDown={e => e.key === "Enter" && handleSubmit()}
+              />
+              <button className="btn" onClick={handleSubmit} disabled={loading || !url.trim()}>
+                {loading ? `Processing${dots}` : "🚀 Clip karo"}
+              </button>
+            </div>
           </div>
-        </div>
 
-        {/* Status */}
-        {status && cfg && (
-          <div className="status-card">
-            {status.status !== "done" && status.status !== "error" && (
-              <>
-                <div className="status-header">
-                  <div className="status-label">
-                    <span className="status-icon">{cfg.icon}</span>
-                    <span style={{ color: cfg.color }}>{cfg.label}{loading ? dots : ""}</span>
+          {status && cfg && (
+            <div className="status-card">
+              {status.status !== "done" && status.status !== "error" && (
+                <>
+                  <div className="status-header">
+                    <div className="status-label">
+                      <span>{cfg.icon}</span>
+                      <span style={{ color: cfg.color }}>{cfg.label}{loading ? dots : ""}</span>
+                    </div>
+                    <div className="status-pct">{status.progress}%</div>
                   </div>
-                  <div className="status-pct">{status.progress}%</div>
-                </div>
+                  <div className="progress-track">
+                    <div className="progress-fill" style={{ width: `${status.progress}%`, background: cfg.color }} />
+                  </div>
+                  <div className="steps">
+                    {Object.entries(statusConfig).filter(([k]) => k !== "done" && k !== "error").map(([key, s]) => {
+                      const order = ["queued","downloading","transcribing","analyzing","cutting","uploading"];
+                      const curIdx = order.indexOf(status.status);
+                      const thisIdx = order.indexOf(key);
+                      const state = thisIdx < curIdx ? "done" : thisIdx === curIdx ? "active" : "";
+                      return (
+                        <div key={key} className={`step ${state}`}>
+                          <div className="step-dot" />
+                          <span className="step-text">{s.icon} {s.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
 
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${status.progress}%`, background: cfg.color }}
-                  />
-                </div>
-
-                {/* Steps */}
-                <div className="steps">
-                  {Object.entries(statusConfig).filter(([k]) => k !== "done" && k !== "error").map(([key, s]) => {
-                    const order = ["queued","downloading","transcribing","analyzing","cutting","uploading"];
-                    const curIdx = order.indexOf(status.status);
-                    const thisIdx = order.indexOf(key);
-                    const state = thisIdx < curIdx ? "done" : thisIdx === curIdx ? "active" : "";
-                    return (
-                      <div key={key} className={`step ${state}`}>
-                        <div className="step-dot" />
-                        <span className="step-text">{s.icon} {s.label}</span>
+              {status.status === "done" && (
+                <>
+                  <div className="clips-header">
+                    ✅ Clips Ready
+                    <span className="clip-count">{status.clips.length} clips</span>
+                  </div>
+                  <div className="clip-list">
+                    {status.clips.map(clip => (
+                      <div key={clip.index} className="clip-item">
+                        <div className="clip-num">#{clip.index}</div>
+                        <div className="clip-info">
+                          <div className="clip-reason">{clip.reason}</div>
+                          <div className="clip-time">⏱ {formatTime(clip.start)} se shuru</div>
+                        </div>
+                        <button className="dl-btn" onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`)}>
+                          ⬇️ Download
+                        </button>
                       </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
+                    ))}
+                  </div>
+                </>
+              )}
 
-            {status.status === "done" && (
-              <>
-                <div className="clips-header">
-                  ✅ Clips Ready
-                  <span className="clip-count">{status.clips.length} clips</span>
+              {status.status === "error" && (
+                <div className="error-box">
+                  <div className="error-title">❌ Error aaya bhai</div>
+                  <div className="error-msg">{status.error || "Kuch toh gadbad hai"}</div>
                 </div>
-                <div className="clip-list">
-                  {status.clips.map(clip => (
-                    <div key={clip.index} className="clip-item">
-                      <div className="clip-num">#{clip.index}</div>
-                      <div className="clip-info">
-                        <div className="clip-reason">{clip.reason}</div>
-                        <div className="clip-time">⏱ {formatTime(clip.start)} se shuru</div>
-                      </div>
-                      <a href={clip.url} target="_blank" rel="noopener noreferrer" className="dl-btn">
-                        ⬇️ Download
-                      </a>
+              )}
+            </div>
+          )}
+
+          <div className="hint">Processing time: ~5-10 min per video</div>
+        </div>
+
+        {/* Sidebar - Old Sessions */}
+        <div className="side-col">
+          <div className="side-title">🕘 Purani Clips</div>
+          {oldSessions.length === 0 ? (
+            <div className="side-empty">Abhi koi purani clips nahi hain</div>
+          ) : (
+            oldSessions.map(session => (
+              <div key={session.id} className="history-item">
+                <div className="history-top">
+                  <div className="history-url">🔗 {getShortUrl(session.url)}</div>
+                  <button className="del-btn" onClick={() => deleteSession(session.id)}>🗑 Delete</button>
+                </div>
+                <div className="history-clips">
+                  {session.clips.map(clip => (
+                    <div key={clip.index} className="history-clip">
+                      <span className="history-clip-num">#{clip.index}</span>
+                      <span className="history-clip-text">{clip.reason}</span>
+                      <button className="history-dl" onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`)}>
+                        ⬇️
+                      </button>
                     </div>
                   ))}
                 </div>
-              </>
-            )}
-
-            {status.status === "error" && (
-              <div className="error-box">
-                <div className="error-title">❌ Error aaya bhai</div>
-                <div className="error-msg">{status.error || "Kuch toh gadbad hai"}</div>
               </div>
-            )}
-          </div>
-        )}
-
-        <div className="hint">Processing time: ~5-10 min per video</div>
+            ))
+          )}
+        </div>
       </div>
     </>
   );
