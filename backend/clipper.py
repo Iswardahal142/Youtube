@@ -39,11 +39,11 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
         )
         data = response.json()
 
-        videos = data.get("videos", {}).get("items", [])
-        mp4_videos = [
-            v for v in videos
-            if v.get("extension") == "mp4" and v.get("height", 0) <= 720
-        ]
+        # Naya — pehle 720p try, phir koi bhi MP4
+mp4_videos = [v for v in videos if v.get("extension") == "mp4"]
+if not mp4_videos:
+    # koi bhi format try karo
+    mp4_videos = [v for v in videos if v.get("url")]
 
         if not mp4_videos:
             add_log(job_id, "⚠️ RapidAPI me koi MP4 nahi mila — yt-dlp try karega")
