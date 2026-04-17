@@ -2,87 +2,6 @@
 import { useState, useEffect, useRef } from "react";
 
 const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000").replace(/\/$/, "");
-const GOOGLE_CLIENT_ID = "347772142933-h2u3ef2orm42bkkl97t8aprro5mrqetu.apps.googleusercontent.com";
-const YT_SCOPE = "https://www.googleapis.com/auth/youtube.upload";
-
-// Google OAuth popup se access token lo
-function getGoogleToken(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // @ts-ignore
-    const client = window.google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: YT_SCOPE,
-      callback: (resp: { access_token?: string; error?: string }) => {
-        if (resp.access_token) resolve(resp.access_token);
-        else reject(new Error(resp.error || "OAuth failed"));
-      },
-    });
-    client.requestAccessToken();
-  });
-}
-
-// Cloudinary URL se blob lo phir YouTube pe upload karo
-async function uploadToYouTube(
-  clipUrl: string,
-  title: string,
-  accessToken: string,
-  onProgress: (pct: number) => void
-): Promise<string> {
-  onProgress(5);
-  const res = await fetch(clipUrl);
-  if (!res.ok) throw new Error("Clip fetch failed");
-  const blob = await res.blob();
-  onProgress(30);
-
-  const metadata = {
-    snippet: { title, description: "Uploaded via YT Clipper 🎬", tags: ["shorts", "clip"] },
-    status: { privacyStatus: "private" },
-  };
-
-  const initRes = await fetch(
-    "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json; charset=UTF-8",
-        "X-Upload-Content-Type": "video/mp4",
-        "X-Upload-Content-Length": String(blob.size),
-      },
-      body: JSON.stringify(metadata),
-    }
-  );
-
-  if (!initRes.ok) {
-    const err = await initRes.text();
-    throw new Error(`YouTube init failed: ${err}`);
-  }
-
-  const uploadUrl = initRes.headers.get("Location");
-  if (!uploadUrl) throw new Error("No upload URL from YouTube");
-  onProgress(40);
-
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", uploadUrl);
-    xhr.setRequestHeader("Content-Type", "video/mp4");
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        onProgress(40 + Math.round((e.loaded / e.total) * 55));
-      }
-    };
-    xhr.onload = () => {
-      if (xhr.status === 200 || xhr.status === 201) {
-        const data = JSON.parse(xhr.responseText);
-        resolve(`https://studio.youtube.com/video/${data.id}/edit`);
-      } else {
-        reject(new Error(`Upload failed: ${xhr.status}`));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Network error during upload"));
-    xhr.send(blob);
-  });
-}
 
 interface Clip {
   index: number;
@@ -208,10 +127,7 @@ export default function Home() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null); // session id
   const [downloadingIdx, setDownloadingIdx] = useState<number | null>(null);
   const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<number>(0);
-  const [ytToken, setYtToken] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [toastType, setToastType] = useState<"info" | "success" | "error">("info");
   const logsEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const sseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -219,16 +135,6 @@ export default function Home() {
   useEffect(() => {
     const raw = localStorage.getItem("yt_sessions");
     if (raw) setSavedSessions(JSON.parse(raw));
-  }, []);
-
-  // Google Identity Services script load karo
-  useEffect(() => {
-    if (document.getElementById("google-gsi")) return;
-    const script = document.createElement("script");
-    script.id = "google-gsi";
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    document.head.appendChild(script);
   }, []);
 
   useEffect(() => {
@@ -396,52 +302,14 @@ export default function Home() {
     setDownloadingIdx(null);
   };
 
-  const showToast = (msg: string, type: "info" | "success" | "error" = "info") => {
+  const showToast = (msg: string) => {
     setToast(msg);
-    setToastType(type);
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), 3000);
   };
 
-  const handleUpload = async (clip: Clip) => {
-    if (uploadingIdx !== null) return;
-    try {
-      // Token already hai toh reuse karo, warna OAuth popup
-      let token = ytToken;
-      if (!token) {
-        showToast("🔐 Google login popup khul raha hai...", "info");
-        token = await getGoogleToken();
-        setYtToken(token);
-      }
-
-      setUploadingIdx(clip.index);
-      setUploadProgress(0);
-      showToast("⬆️ YouTube pe upload ho raha hai...", "info");
-
-      const title = `Clip ${clip.index} — ${clip.reason.slice(0, 60)}`;
-      const studioUrl = await uploadToYouTube(
-        clip.url,
-        title,
-        token,
-        (pct) => setUploadProgress(pct)
-      );
-
-      setUploadingIdx(null);
-      setUploadProgress(0);
-      showToast("✅ YouTube pe upload ho gaya! Studio mein dekho.", "success");
-      setTimeout(() => window.open(studioUrl, "_blank"), 1500);
-
-    } catch (err: unknown) {
-      setUploadingIdx(null);
-      setUploadProgress(0);
-      const msg = err instanceof Error ? err.message : "Upload fail";
-      // Token expire ho gaya hoga — clear karo
-      if (msg.includes("401") || msg.includes("403")) {
-        setYtToken(null);
-        showToast("❌ Login expire — dobara Upload dabao", "error");
-      } else {
-        showToast(`❌ ${msg}`, "error");
-      }
-    }
+  const handleUpload = (idx: number) => {
+    // YouTube upload — coming soon
+    showToast("🚀 YouTube upload coming soon!");
   };
 
   const cfg = status ? statusConfig[status.status] : null;
@@ -673,19 +541,9 @@ export default function Home() {
           padding: 9px 14px; font-size: 12px;
           font-weight: 600; font-family: 'DM Sans', sans-serif;
           cursor: pointer; transition: background 0.2s;
-          white-space: nowrap; min-width: 90px; text-align: center;
+          white-space: nowrap;
         }
-        .upload-btn:hover:not(:disabled) { background: #22224a; }
-        .upload-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-        .upload-btn.uploading {
-          background: #22224a;
-          border-color: #818cf866;
-          animation: uploadPulse 1s infinite;
-        }
-        @keyframes uploadPulse {
-          0%, 100% { border-color: #818cf866; }
-          50% { border-color: #818cf8cc; }
-        }
+        .upload-btn:hover { background: #22224a; }
         .dl-btn {
           flex: 1;
           background: #ff2d2d; color: #fff;
@@ -849,13 +707,10 @@ export default function Home() {
       {toast && (
         <div style={{
           position: "fixed", bottom: 32, left: "50%", transform: "translateX(-50%)",
-          background: toastType === "success" ? "#0a2a0a" : toastType === "error" ? "#1a0a0a" : "#1e1e2e",
-          border: `1px solid ${toastType === "success" ? "#22c55e44" : toastType === "error" ? "#ef444444" : "#818cf844"}`,
-          color: toastType === "success" ? "#22c55e" : toastType === "error" ? "#ef4444" : "#818cf8",
+          background: "#1e1e2e", border: "1px solid #818cf844", color: "#818cf8",
           borderRadius: 12, padding: "12px 24px", fontSize: 13, fontWeight: 600,
-          zIndex: 9999, boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-          animation: "fadeIn 0.2s ease", whiteSpace: "nowrap",
-          maxWidth: "90vw", overflow: "hidden", textOverflow: "ellipsis",
+          zIndex: 9999, boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+          animation: "fadeIn 0.2s ease"
         }}>
           {toast}
         </div>
@@ -963,13 +818,10 @@ export default function Home() {
                       </div>
                       <div className="clip-actions">
                         <button
-                          className={`upload-btn ${uploadingIdx === clip.index ? "uploading" : ""}`}
-                          disabled={uploadingIdx !== null}
-                          onClick={() => handleUpload(clip)}
+                          className="upload-btn"
+                          onClick={() => handleUpload(clip.index)}
                         >
-                          {uploadingIdx === clip.index
-                            ? `⬆️ ${uploadProgress}%`
-                            : "▲ YouTube"}
+                          ▲ Upload
                         </button>
                         <button
                           className="dl-btn"
