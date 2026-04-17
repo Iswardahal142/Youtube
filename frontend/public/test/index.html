@@ -379,17 +379,37 @@
 </div>
 
 <script>
-  // --- Supabase JS CDN ---
-  const SUPABASE_CDN = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js';
   let supabase = null;
   let uploadFile = null;
+  let _supabaseLib = null;
 
-  // Load Supabase SDK
-  const script = document.createElement('script');
-  script.src = SUPABASE_CDN;
-  script.onload = () => log('info', '✅ Supabase SDK load ho gaya');
-  script.onerror = () => log('error', '❌ Supabase SDK load nahi hua — internet check karo');
-  document.head.appendChild(script);
+  async function loadSupabaseSDK() {
+    const cdns = [
+      'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js',
+      'https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js',
+    ];
+    for (const cdn of cdns) {
+      try {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = cdn;
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+        if (window.supabase && window.supabase.createClient) {
+          _supabaseLib = window.supabase;
+          log('success', '✅ Supabase SDK load ho gaya');
+          return;
+        }
+      } catch(e) {
+        log('warn', `⚠️ CDN fail hua, next try kar raha hoon...`);
+      }
+    }
+    log('error', '❌ Supabase SDK load nahi hua — internet check karo');
+  }
+
+  window.addEventListener('DOMContentLoaded', loadSupabaseSDK);
 
   // File input
   document.getElementById('file-input').addEventListener('change', e => {
@@ -438,9 +458,13 @@
       return;
     }
 
-    if (!window.supabase) {
-      log('error', '❌ Supabase SDK abhi load nahi hua, thoda wait karo');
-      return;
+    if (!_supabaseLib) {
+      log('warn', '⏳ SDK load ho raha hai, retry kar raha hoon...');
+      await loadSupabaseSDK();
+      if (!_supabaseLib) {
+        log('error', '❌ Supabase SDK load nahi hua — internet check karo');
+        return;
+      }
     }
 
     const btn = document.getElementById('btn-connect');
@@ -451,7 +475,7 @@
     log('info', `🪣 Bucket: ${bucket}`);
 
     try {
-      supabase = window.supabase.createClient(url, key);
+      supabase = _supabaseLib.createClient(url, key);
       log('info', '✅ Client create ho gaya');
 
       // Test: list bucket files
