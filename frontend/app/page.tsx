@@ -880,7 +880,7 @@ export default function Home() {
                           onClick={() => !expiry.expired && downloadClip(clip.url, `clip_${clip.index}.mp4`)}
                           style={expiry.expired ? { opacity: 0.3, cursor: "not-allowed" } : {}}
                         >
-                          ⬇️
+                          Download
                         </button>
                       </div>
                     ))}
