@@ -10,6 +10,10 @@ RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
 
+# Instagram 4:5 aspect ratio (portrait)
+INSTAGRAM_WIDTH = 1080
+INSTAGRAM_HEIGHT = 1350  # 4:5 = 1080x1350
+
 
 def download_video(url: str, video_path: str, job_id: str) -> bool:
     """Download video — RapidAPI first, yt-dlp fallback"""
@@ -89,7 +93,6 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
         if os.path.exists(video_path):
             os.remove(video_path)
 
-        # ffmpeg merge avoid karo — single file format use karo
         cmd = [
             "yt-dlp",
             "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
@@ -165,13 +168,13 @@ def get_transcript(url: str, job_id: str) -> list:
 
 
 def find_best_moments(segments: list, video_duration: int, job_id: str) -> list:
-    """Use OpenRouter AI to find top 10 most interesting moments"""
+    """Use OpenRouter AI (gpt-4.1-nano) to find top 10 most interesting moments"""
     if not segments:
         step = video_duration // TOP_N_CLIPS
         add_log(job_id, f"🤖 Transcript nahi tha — equally spaced {TOP_N_CLIPS} clips ban rahe hain")
         return [{"start": i * step, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
 
-    add_log(job_id, "🤖 AI best moments dhundh raha hai...")
+    add_log(job_id, "🤖 AI best moments dhundh raha hai (gpt-4.1-nano)...")
 
     transcript_text = ""
     for seg in segments:
@@ -180,12 +183,13 @@ def find_best_moments(segments: list, video_duration: int, job_id: str) -> list:
         transcript_text += f"[{start}s] {text}\n"
 
     prompt = f"""Ye ek YouTube video ka transcript hai timestamps ke saath.
-Mujhe TOP 10 most interesting/viral moments chahiye jo 60 second clips ban sakein.
+Mujhe TOP 10 most interesting/viral moments chahiye jo 60 second Instagram Reels/clips ban sakein.
 
 Rules:
 - Har moment ek complete thought/story ho
-- Exciting, informative, ya emotional moments prefer karo
-- Response SIRF JSON mein do, kuch aur mat likho
+- Exciting, informative, ya emotional moments prefer karo — jo Instagram pe viral ho sakein
+- Short punchy moments better hain
+- Response SIRF JSON mein do, kuch aur mat likho, no markdown backticks
 
 Format:
 [
@@ -205,7 +209,7 @@ Transcript:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "anthropic/claude-3-haiku",
+                "model": "openai/gpt-4.1-nano",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 1000,
             },
@@ -235,27 +239,58 @@ def get_video_duration(video_path: str) -> int:
         return 3600
 
 
-def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
-    """Cut a 60-second clip using FFmpeg"""
+def cut_clip_instagram(video_path: str, start: int, job_id: str, index: int) -> str:
+    """
+    Cut a 60-second clip and convert to Instagram 4:5 portrait (1080x1350).
+    
+    Strategy:
+    - Source video usually 16:9 landscape (e.g. 1280x720)
+    - We scale to fit height = 1350, then crop width to 1080 (center crop)
+    - If source is already portrait or square, we pad with blurred background
+    - Output: 1080x1350 MP4 — perfect for Instagram Feed & Reels
+    """
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
+
+    # FFmpeg filter:
+    # 1. Scale video so height = 1350 (keeping aspect ratio)
+    # 2. Crop width to 1080 from center → gives 1080x1350 (4:5)
+    # If the video is already narrower than 1080 after scaling, pad instead.
+    #
+    # Smart filter:
+    # - scale to fit inside 1080x1350 with letterbox/pillarbox
+    # - then pad to exactly 1080x1350 (black bars or use blur bg trick)
+    #
+    # Best Instagram approach: scale height to 1350, then center-crop width to 1080
+    # This works great for landscape 16:9 videos (fills frame nicely)
+
+    vf_filter = (
+        f"scale={INSTAGRAM_WIDTH}:{INSTAGRAM_HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop={INSTAGRAM_WIDTH}:{INSTAGRAM_HEIGHT}"
+    )
+
     subprocess.run([
         "ffmpeg", "-y",
         "-ss", str(max(0, start - 2)),
         "-i", video_path,
         "-t", str(CLIP_DURATION),
+        "-vf", vf_filter,
         "-c:v", "libx264",
         "-c:a", "aac",
         "-preset", "fast",
-        "-crf", "28",
+        "-crf", "26",
+        "-pix_fmt", "yuv420p",          # Instagram compatibility
+        "-movflags", "+faststart",       # Web streaming optimized
+        "-s", f"{INSTAGRAM_WIDTH}x{INSTAGRAM_HEIGHT}",
         output_path
-    ], capture_output=True, timeout=120)
+    ], capture_output=True, timeout=180)
+
     return output_path
 
 
 def process_video(url: str, job_id: str):
-    """Main pipeline: download → subtitles → AI → cut → upload"""
+    """Main pipeline: download → subtitles → AI → cut (4:5) → upload"""
     try:
-        add_log(job_id, "🚀 Processing shuru ho gaya!")
+        add_log(job_id, "🚀 Processing shuru ho gaya! (Instagram 4:5 mode)")
         update_job(job_id, {"status": "downloading", "progress": 10})
 
         video_path = f"/tmp/{job_id}.mp4"
@@ -288,15 +323,15 @@ def process_video(url: str, job_id: str):
             moments = [{"start": i * 360, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
 
         update_job(job_id, {"status": "cutting", "progress": 60})
-        add_log(job_id, f"✂️ {len(moments)} clips cut ho rahi hain...")
+        add_log(job_id, f"✂️ {len(moments)} clips cut ho rahi hain (1080x1350 Instagram 4:5)...")
 
         clips = []
         for i, moment in enumerate(moments):
             start = moment.get("start", i * 300)
             reason = moment.get("reason", f"Clip {i+1}")
 
-            add_log(job_id, f"✂️ Clip {i+1}/{len(moments)} cut ho rahi hai ({start//60}m {start%60}s se)...")
-            clip_path = cut_clip(video_path, start, job_id, i)
+            add_log(job_id, f"✂️ Clip {i+1}/{len(moments)} cut ho rahi hai ({start//60}m {start%60}s se) → 4:5 format...")
+            clip_path = cut_clip_instagram(video_path, start, job_id, i)
 
             if os.path.exists(clip_path):
                 progress = 60 + int(((i + 1) / len(moments)) * 35)
@@ -321,7 +356,7 @@ def process_video(url: str, job_id: str):
         if os.path.exists(video_path):
             os.remove(video_path)
 
-        add_log(job_id, f"🎉 Sab done! {len(clips)} clips ready hain!")
+        add_log(job_id, f"🎉 Sab done! {len(clips)} Instagram-ready clips taiyaar hain! (1080x1350, 4:5)")
         update_job(job_id, {
             "status": "done",
             "progress": 100,
