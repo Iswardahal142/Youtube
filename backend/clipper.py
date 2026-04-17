@@ -6,72 +6,110 @@ import requests
 from storage import update_job, upload_clip, add_log
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
 
-COOKIES_FILE = os.path.join(os.path.dirname(__file__), "yt_cookies.txt")
-
 
 def download_video(url: str, video_path: str, job_id: str) -> bool:
-    """Download video using yt-dlp (RapidAPI hata diya)"""
-    try:
-        add_log(job_id, "📡 yt-dlp se video download shuru...")
+    """Download video — RapidAPI first, yt-dlp fallback"""
 
-        cmd = [
-            "yt-dlp",
-            "--format", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best",
-            "--merge-output-format", "mp4",
-            "--no-playlist",
-            "--output", video_path,
-            "--extractor-args", "youtube:player_client=ios",
-            "--no-check-certificate",
-            "--retries", "3",
+    # --- Method 1: RapidAPI ---
+    try:
+        video_id = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
+        if not video_id:
+            add_log(job_id, "❌ Video ID nahi mila URL se")
+            return False
+        video_id = video_id.group(1)
+        add_log(job_id, f"🔍 Video ID mila: {video_id}")
+
+        add_log(job_id, "📡 RapidAPI se video info le raha hai...")
+        response = requests.get(
+            "https://youtube-media-downloader.p.rapidapi.com/v2/video/details",
+            headers={
+                "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com",
+                "x-rapidapi-key": RAPIDAPI_KEY
+            },
+            params={"videoId": video_id},
+            timeout=30
+        )
+        data = response.json()
+
+        videos = data.get("videos", {}).get("items", [])
+        mp4_videos = [
+            v for v in videos
+            if v.get("extension") == "mp4" and v.get("height", 0) <= 720
         ]
 
-        # Cookies file hai to use karo
-        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
-            cmd += ["--cookies", COOKIES_FILE]
-            add_log(job_id, "🍪 Cookies use ho rahe hain...")
+        if not mp4_videos:
+            add_log(job_id, "⚠️ RapidAPI me koi MP4 nahi mila — yt-dlp try karega")
+            raise Exception("No MP4 found via RapidAPI")
 
-        cmd.append(url)
+        best = sorted(mp4_videos, key=lambda x: x.get("height", 0), reverse=True)[0]
+        download_url = best.get("url")
+        add_log(job_id, f"⬇️ {best.get('height')}p RapidAPI se download ho rahi hai...")
 
-        add_log(job_id, "⬇️ Download ho rahi hai...")
-        update_job(job_id, {"progress": 12})
+        with requests.get(download_url, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            total = int(r.headers.get('content-length', 0))
+            downloaded = 0
+            last_logged_pct = 0
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            with open(video_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+                    downloaded += len(chunk)
 
-        if result.returncode != 0:
-            add_log(job_id, f"⚠️ yt-dlp error: {result.stderr[-300:] if result.stderr else 'unknown'}")
-            # Fallback: simple best format
-            add_log(job_id, "🔄 Fallback format try kar raha hoon...")
-            cmd_fallback = [
-                "yt-dlp", "--format", "best",
-                "--no-playlist", "--output", video_path,
-                "--no-check-certificate",
-            ]
-            if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
-                cmd_fallback += ["--cookies", COOKIES_FILE]
-            cmd_fallback.append(url)
+                    if total:
+                        dl_pct = int((downloaded / total) * 100)
+                        progress = 10 + int((downloaded / total) * 18)
+                        update_job(job_id, {"progress": progress})
 
-            result2 = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=600)
-            if result2.returncode != 0:
-                add_log(job_id, f"❌ Fallback bhi fail: {result2.stderr[-200:] if result2.stderr else 'unknown'}")
-                return False
+                        if dl_pct - last_logged_pct >= 20:
+                            mb_done = downloaded / (1024 * 1024)
+                            mb_total = total / (1024 * 1024)
+                            add_log(job_id, f"⬇️ Download: {dl_pct}% ({mb_done:.1f}/{mb_total:.1f} MB)")
+                            last_logged_pct = dl_pct
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ Download complete! ({size_mb:.1f} MB)")
-            update_job(job_id, {"progress": 28})
+            add_log(job_id, f"✅ RapidAPI download complete! ({size_mb:.1f} MB)")
             return True
         else:
-            add_log(job_id, "❌ File empty hai ya exist nahi karti")
+            add_log(job_id, "⚠️ RapidAPI file empty — yt-dlp try karega")
+
+    except Exception as e:
+        add_log(job_id, f"⚠️ RapidAPI fail: {e} — yt-dlp fallback shuru...")
+
+    # --- Method 2: yt-dlp fallback ---
+    try:
+        add_log(job_id, "🔄 yt-dlp se download ho raha hai...")
+        update_job(job_id, {"progress": 12})
+
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
+        # ffmpeg merge avoid karo — single file format use karo
+        cmd = [
+            "yt-dlp",
+            "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+            "--no-playlist",
+            "--no-check-certificate",
+            "-o", video_path,
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+            size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            add_log(job_id, f"✅ yt-dlp download complete! ({size_mb:.1f} MB)")
+            return True
+        else:
+            add_log(job_id, f"❌ yt-dlp bhi fail: {result.stderr[-300:]}")
             return False
 
-    except subprocess.TimeoutExpired:
-        add_log(job_id, "❌ Download timeout — video bahut badi hai ya net slow hai")
-        return False
     except Exception as e:
-        add_log(job_id, f"❌ Download error: {e}")
+        add_log(job_id, f"❌ yt-dlp error: {e}")
         return False
 
 
@@ -82,13 +120,16 @@ def get_transcript(url: str, job_id: str) -> list:
         subtitle_path = f"/tmp/subs_{os.path.basename(url)[-10:]}"
         cmd = [
             "yt-dlp",
-            "--write-auto-sub", "--write-sub",
+            "--write-auto-sub",
+            "--write-sub",
             "--sub-lang", "en",
             "--sub-format", "json3",
             "--skip-download",
-            "--extractor-args", "youtube:player_client=ios",
-            "-o", subtitle_path, url
+            "--no-check-certificate",
+            "-o", subtitle_path,
+            url
         ]
+
         subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
         sub_file = None
@@ -100,20 +141,26 @@ def get_transcript(url: str, job_id: str) -> list:
         if sub_file and os.path.exists(sub_file):
             with open(sub_file) as f:
                 data = json.load(f)
+
             segments = []
             for event in data.get("events", []):
                 start_ms = event.get("tStartMs", 0)
                 segs = event.get("segs", [])
                 text = " ".join(s.get("utf8", "") for s in segs).strip()
                 if text and text != "\n":
-                    segments.append({"start": start_ms / 1000, "text": text})
+                    segments.append({
+                        "start": start_ms / 1000,
+                        "text": text
+                    })
             os.remove(sub_file)
             add_log(job_id, f"✅ Transcript mila — {len(segments)} segments")
             return segments
         else:
-            add_log(job_id, "⚠️ Transcript nahi mila — equally spaced clips banenge")
+            add_log(job_id, "⚠️ Transcript nahi mila — AI equally space karega clips")
+
     except Exception as e:
         add_log(job_id, f"⚠️ Transcript error: {e}")
+
     return []
 
 
@@ -121,10 +168,11 @@ def find_best_moments(segments: list, video_duration: int, job_id: str) -> list:
     """Use OpenRouter AI to find top 10 most interesting moments"""
     if not segments:
         step = video_duration // TOP_N_CLIPS
-        add_log(job_id, f"🤖 Equally spaced {TOP_N_CLIPS} clips ban rahe hain")
+        add_log(job_id, f"🤖 Transcript nahi tha — equally spaced {TOP_N_CLIPS} clips ban rahe hain")
         return [{"start": i * step, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
 
     add_log(job_id, "🤖 AI best moments dhundh raha hai...")
+
     transcript_text = ""
     for seg in segments:
         start = int(seg.get("start", 0))
@@ -148,11 +196,19 @@ Format:
 Transcript:
 {transcript_text[:8000]}
 """
+
     try:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "anthropic/claude-3-haiku", "messages": [{"role": "user", "content": prompt}], "max_tokens": 1000},
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "anthropic/claude-3-haiku",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1000,
+            },
             timeout=60
         )
         content = response.json()["choices"][0]["message"]["content"]
@@ -166,10 +222,13 @@ Transcript:
 
 
 def get_video_duration(video_path: str) -> int:
+    """Get video duration in seconds"""
     try:
         result = subprocess.run([
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", video_path
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
         ], capture_output=True, text=True)
         return int(float(result.stdout.strip()))
     except:
@@ -177,16 +236,24 @@ def get_video_duration(video_path: str) -> int:
 
 
 def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
+    """Cut a 60-second clip using FFmpeg"""
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
     subprocess.run([
-        "ffmpeg", "-y", "-ss", str(max(0, start - 2)), "-i", video_path,
-        "-t", str(CLIP_DURATION), "-c:v", "libx264", "-c:a", "aac",
-        "-preset", "fast", "-crf", "28", output_path
+        "ffmpeg", "-y",
+        "-ss", str(max(0, start - 2)),
+        "-i", video_path,
+        "-t", str(CLIP_DURATION),
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-preset", "fast",
+        "-crf", "28",
+        output_path
     ], capture_output=True, timeout=120)
     return output_path
 
 
 def process_video(url: str, job_id: str):
+    """Main pipeline: download → subtitles → AI → cut → upload"""
     try:
         add_log(job_id, "🚀 Processing shuru ho gaya!")
         update_job(job_id, {"status": "downloading", "progress": 10})
@@ -199,6 +266,7 @@ def process_video(url: str, job_id: str):
             update_job(job_id, {"status": "error", "error": "Video download failed. Try a different URL."})
             return
 
+        # Thumbnail
         thumbnail_url = ""
         try:
             video_id = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
@@ -226,26 +294,40 @@ def process_video(url: str, job_id: str):
         for i, moment in enumerate(moments):
             start = moment.get("start", i * 300)
             reason = moment.get("reason", f"Clip {i+1}")
+
             add_log(job_id, f"✂️ Clip {i+1}/{len(moments)} cut ho rahi hai ({start//60}m {start%60}s se)...")
             clip_path = cut_clip(video_path, start, job_id, i)
 
             if os.path.exists(clip_path):
                 progress = 60 + int(((i + 1) / len(moments)) * 35)
                 update_job(job_id, {"status": "uploading", "progress": progress})
-                add_log(job_id, f"☁️ Clip {i+1} Supabase pe upload ho rahi hai...")
+                add_log(job_id, f"☁️ Clip {i+1} Cloudinary pe upload ho rahi hai...")
+
                 clip_url = upload_clip(clip_path, job_id, i)
+
                 if clip_url:
                     add_log(job_id, f"✅ Clip {i+1} upload complete!")
                 else:
                     add_log(job_id, f"⚠️ Clip {i+1} upload fail hui")
-                clips.append({"index": i + 1, "start": start, "reason": reason, "url": clip_url})
+
+                clips.append({
+                    "index": i + 1,
+                    "start": start,
+                    "reason": reason,
+                    "url": clip_url
+                })
                 os.remove(clip_path)
 
         if os.path.exists(video_path):
             os.remove(video_path)
 
         add_log(job_id, f"🎉 Sab done! {len(clips)} clips ready hain!")
-        update_job(job_id, {"status": "done", "progress": 100, "clips": clips, "thumbnail": thumbnail_url})
+        update_job(job_id, {
+            "status": "done",
+            "progress": 100,
+            "clips": clips,
+            "thumbnail": thumbnail_url
+        })
 
     except Exception as e:
         add_log(job_id, f"❌ Fatal error: {e}")
