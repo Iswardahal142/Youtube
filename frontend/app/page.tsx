@@ -32,10 +32,15 @@ const statusConfig: Record<string, { label: string; icon: string; color: string 
   transcribing: { label: "Transcript ban raha hai", icon: "🎙️", color: "#8b5cf6" },
   analyzing:    { label: "AI moments dhundh raha",  icon: "🤖", color: "#ec4899" },
   cutting:      { label: "Clips cut ho rahi hain",  icon: "✂️", color: "#f97316" },
-  uploading:    { label: "Supabase pe upload",      icon: "☁️", color: "#06b6d4" },
+  uploading:    { label: "Cloudinary pe upload",    icon: "☁️", color: "#06b6d4" },
   done:         { label: "Clips ready hain!",       icon: "✅", color: "#22c55e" },
   error:        { label: "Error aaya",              icon: "❌", color: "#ef4444" },
 };
+
+const STATUS_ORDER = ["queued", "downloading", "transcribing", "analyzing", "cutting", "uploading"];
+
+// SSE timeout — agar 60s mein koi message nahi aaya toh error
+const SSE_TIMEOUT_MS = 60000;
 
 function formatTime(seconds: number) {
   const m = Math.floor(seconds / 60);
@@ -52,6 +57,59 @@ function getShortUrl(url: string) {
   }
 }
 
+function getExpiryInfo(createdAt: number) {
+  const expiresAt = createdAt + 24 * 60 * 60 * 1000;
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) return { expired: true, label: "Expired" };
+  const hrs = Math.floor(remaining / (1000 * 60 * 60));
+  const mins = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+  if (hrs > 0) return { expired: false, label: `${hrs}h ${mins}m baki` };
+  return { expired: false, label: `${mins}m baki` };
+}
+
+// Cloudinary ke liye fetch+blob download
+async function downloadClip(clipUrl: string, fileName: string) {
+  try {
+    const res = await fetch(clipUrl);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+  } catch {
+    // fallback — direct open
+    window.open(clipUrl, "_blank");
+  }
+}
+
+// Confirm Dialog Component
+function ConfirmDialog({
+  message,
+  onConfirm,
+  onCancel,
+}: {
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="confirm-overlay">
+      <div className="confirm-box">
+        <div className="confirm-icon">🗑</div>
+        <div className="confirm-msg">{message}</div>
+        <div className="confirm-btns">
+          <button className="confirm-cancel" onClick={onCancel}>Cancel</button>
+          <button className="confirm-ok" onClick={onConfirm}>Haan, Delete karo</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<JobStatus | null>(null);
@@ -60,8 +118,11 @@ export default function Home() {
   const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null); // session id
+  const [downloadingIdx, setDownloadingIdx] = useState<number | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
+  const sseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const raw = localStorage.getItem("yt_sessions");
@@ -74,7 +135,6 @@ export default function Home() {
     return () => clearInterval(t);
   }, [loading]);
 
-  // Auto scroll logs to bottom
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [liveLogs]);
@@ -84,14 +144,28 @@ export default function Home() {
     localStorage.setItem("yt_sessions", JSON.stringify(sessions));
   };
 
+  const resetSseTimeout = (jobId: string, es: EventSource) => {
+    if (sseTimeoutRef.current) clearTimeout(sseTimeoutRef.current);
+    sseTimeoutRef.current = setTimeout(() => {
+      es.close();
+      setLoading(false);
+      setStatus({ status: "error", progress: 0, clips: [], error: "Connection timeout — backend se koi response nahi aaya 60 seconds tak. Railway pe service check karo." });
+    }, SSE_TIMEOUT_MS);
+  };
+
   const startSSE = (jobId: string, videoUrl: string) => {
-    // Pehla SSE band karo agar chal raha ho
     if (esRef.current) esRef.current.close();
 
     const es = new EventSource(`${BACKEND_URL}/logs/${jobId}`);
     esRef.current = es;
 
+    // Start timeout
+    resetSseTimeout(jobId, es);
+
     es.onmessage = (event) => {
+      // Koi bhi message aaya — timeout reset karo
+      resetSseTimeout(jobId, es);
+
       try {
         const data = JSON.parse(event.data);
 
@@ -108,6 +182,7 @@ export default function Home() {
         }
 
         if (data.type === "done") {
+          if (sseTimeoutRef.current) clearTimeout(sseTimeoutRef.current);
           es.close();
           setLoading(false);
 
@@ -138,18 +213,30 @@ export default function Home() {
         }
 
         if (data.type === "error") {
+          if (sseTimeoutRef.current) clearTimeout(sseTimeoutRef.current);
           es.close();
           setLoading(false);
           setStatus({ status: "error", progress: 0, clips: [], error: data.message });
         }
       } catch {
-        // parse error ignore karo
+        // parse error ignore
       }
     };
 
     es.onerror = () => {
+      if (sseTimeoutRef.current) clearTimeout(sseTimeoutRef.current);
       es.close();
       setLoading(false);
+      setStatus(prev => {
+        // Agar already done/error hai toh mat badlo
+        if (prev?.status === "done" || prev?.status === "error") return prev;
+        return {
+          status: "error",
+          progress: prev?.progress ?? 0,
+          clips: prev?.clips ?? [],
+          error: "SSE connection toot gayi — backend se disconnect ho gaya. Page reload karke try karo.",
+        };
+      });
     };
   };
 
@@ -177,7 +264,6 @@ export default function Home() {
       setCurrentSessionId(data.job_id);
       setStatus({ status: "queued", progress: 0, clips: [] });
 
-      // SSE shuru karo
       startSSE(data.job_id, url);
 
     } catch (err: unknown) {
@@ -199,16 +285,13 @@ export default function Home() {
   const deleteSession = (id: string) => {
     const updated = savedSessions.filter(s => s.id !== id);
     saveSessions(updated);
+    setConfirmDelete(null);
   };
 
-  const handleDownload = (clipUrl: string, fileName: string) => {
-    const a = document.createElement("a");
-    a.href = clipUrl;
-    a.download = fileName;
-    a.target = "_blank";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const handleDownload = async (clipUrl: string, fileName: string, idx: number) => {
+    setDownloadingIdx(idx);
+    await downloadClip(clipUrl, fileName);
+    setDownloadingIdx(null);
   };
 
   const cfg = status ? statusConfig[status.status] : null;
@@ -379,6 +462,7 @@ export default function Home() {
           margin-bottom: 8px; font-family: 'DM Sans', sans-serif;
         }
 
+        /* Clips */
         .clips-header {
           font-family: 'Syne', sans-serif;
           font-size: 18px; font-weight: 700;
@@ -390,39 +474,58 @@ export default function Home() {
           font-size: 12px; font-weight: 600;
           padding: 3px 10px; border-radius: 99px;
         }
-        .clip-list { display: flex; flex-direction: column; gap: 10px; }
-        .clip-item {
+        .clip-list { display: flex; flex-direction: column; gap: 16px; }
+
+        /* New clip card with video preview */
+        .clip-card {
           background: #161616; border: 1px solid #222;
-          border-radius: 14px; padding: 14px 16px;
-          display: flex; align-items: center; gap: 12px;
+          border-radius: 16px; overflow: hidden;
           transition: border-color 0.2s;
         }
-        .clip-item:hover { border-color: #333; }
+        .clip-card:hover { border-color: #333; }
+        .clip-video {
+          width: 100%; display: block;
+          max-height: 280px;
+          background: #000;
+          border-bottom: 1px solid #1e1e1e;
+        }
+        .clip-meta {
+          padding: 14px 16px;
+        }
+        .clip-meta-top {
+          display: flex; align-items: center;
+          gap: 10px; margin-bottom: 12px;
+        }
         .clip-num {
           width: 32px; height: 32px;
           background: #ff2d2d22; color: #ff2d2d;
-          border-radius: 8px;
+          border-radius: 8px; flex-shrink: 0;
           display: flex; align-items: center; justify-content: center;
           font-family: 'Syne', sans-serif;
-          font-weight: 700; font-size: 13px; flex-shrink: 0;
+          font-weight: 700; font-size: 13px;
         }
         .clip-info { flex: 1; min-width: 0; }
         .clip-reason {
           font-size: 13px; color: #ccc;
-          margin-bottom: 4px;
-          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+          margin-bottom: 3px;
         }
         .clip-time { font-size: 11px; color: #444; }
+        .clip-actions {
+          display: flex; gap: 8px;
+        }
         .dl-btn {
+          flex: 1;
           background: #ff2d2d; color: #fff;
           border: none; border-radius: 10px;
-          padding: 8px 14px; font-size: 12px;
+          padding: 9px 14px; font-size: 12px;
           font-weight: 600; font-family: 'DM Sans', sans-serif;
           cursor: pointer; transition: background 0.2s;
-          white-space: nowrap;
+          white-space: nowrap; text-align: center;
         }
-        .dl-btn:hover { background: #e62222; }
+        .dl-btn:hover:not(:disabled) { background: #e62222; }
+        .dl-btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
 
+        /* Sidebar */
         .side-title {
           font-family: 'Syne', sans-serif;
           font-size: 16px; font-weight: 700;
@@ -440,7 +543,7 @@ export default function Home() {
         }
         .history-top {
           display: flex; align-items: center;
-          justify-content: space-between; margin-bottom: 8px;
+          justify-content: space-between; margin-bottom: 6px;
         }
         .history-url {
           font-size: 12px; color: #555;
@@ -455,9 +558,22 @@ export default function Home() {
           transition: background 0.2s;
         }
         .del-btn:hover { background: #2a1010; }
-        .history-clips {
-          display: flex; flex-direction: column; gap: 6px;
+
+        /* Expiry badge */
+        .expiry-badge {
+          font-size: 10px; padding: 2px 8px;
+          border-radius: 99px; margin-bottom: 8px;
+          display: inline-block;
         }
+        .expiry-badge.ok { background: #0a2a0a; color: #22c55e; border: 1px solid #22c55e33; }
+        .expiry-badge.expired { background: #1a0a0a; color: #ef4444; border: 1px solid #ef444433; }
+
+        .history-thumb {
+          width: 100%; border-radius: 8px;
+          margin-bottom: 10px; object-fit: cover;
+          max-height: 120px; border: 1px solid #1e1e1e;
+        }
+        .history-clips { display: flex; flex-direction: column; gap: 6px; }
         .history-clip {
           display: flex; align-items: center;
           gap: 8px; font-size: 12px; color: #666;
@@ -497,16 +613,65 @@ export default function Home() {
           object-fit: cover; max-height: 200px;
           border: 1px solid #222;
         }
-        .history-thumb {
-          width: 100%; border-radius: 8px;
-          margin-bottom: 10px; object-fit: cover;
-          max-height: 120px; border: 1px solid #1e1e1e;
-        }
         .hint {
           text-align: center; color: #2a2a2a;
           font-size: 12px; margin-top: 32px;
         }
+
+        /* Confirm dialog */
+        .confirm-overlay {
+          position: fixed; inset: 0;
+          background: rgba(0,0,0,0.75);
+          display: flex; align-items: center; justify-content: center;
+          z-index: 999;
+          backdrop-filter: blur(4px);
+        }
+        .confirm-box {
+          background: #161616; border: 1px solid #2a2a2a;
+          border-radius: 20px; padding: 32px 28px;
+          max-width: 360px; width: 90%;
+          text-align: center;
+        }
+        .confirm-icon { font-size: 32px; margin-bottom: 12px; }
+        .confirm-msg {
+          font-size: 14px; color: #aaa;
+          line-height: 1.6; margin-bottom: 24px;
+        }
+        .confirm-btns { display: flex; gap: 10px; }
+        .confirm-cancel {
+          flex: 1; background: #1e1e1e; color: #888;
+          border: 1px solid #2a2a2a; border-radius: 12px;
+          padding: 12px; font-size: 13px; font-weight: 500;
+          font-family: 'DM Sans', sans-serif;
+          cursor: pointer; transition: background 0.2s;
+        }
+        .confirm-cancel:hover { background: #252525; }
+        .confirm-ok {
+          flex: 1; background: #ef4444; color: #fff;
+          border: none; border-radius: 12px;
+          padding: 12px; font-size: 13px; font-weight: 600;
+          font-family: 'DM Sans', sans-serif;
+          cursor: pointer; transition: background 0.2s;
+        }
+        .confirm-ok:hover { background: #dc2626; }
+
+        /* Expire warning banner */
+        .expire-banner {
+          background: #1a1200; border: 1px solid #f59e0b33;
+          border-radius: 10px; padding: 10px 14px;
+          font-size: 12px; color: #f59e0b;
+          margin-bottom: 14px; display: flex;
+          align-items: center; gap: 8px;
+        }
       `}</style>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          message="Is session ki saari clips delete ho jayengi. Pakka karna hai?"
+          onConfirm={() => deleteSession(confirmDelete)}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
 
       <div className="layout">
         {/* Main Column */}
@@ -549,9 +714,8 @@ export default function Home() {
                 </div>
                 <div className="steps">
                   {Object.entries(statusConfig).filter(([k]) => k !== "done" && k !== "error").map(([key, s]) => {
-                    const order = ["queued","downloading","transcribing","analyzing","cutting","uploading"];
-                    const curIdx = order.indexOf(status.status);
-                    const thisIdx = order.indexOf(key);
+                    const curIdx = STATUS_ORDER.indexOf(status.status);
+                    const thisIdx = STATUS_ORDER.indexOf(key);
                     const state = thisIdx < curIdx ? "done" : thisIdx === curIdx ? "active" : "";
                     return (
                       <div key={key} className={`step ${state}`}>
@@ -562,7 +726,6 @@ export default function Home() {
                   })}
                 </div>
 
-                {/* Live Logs Terminal */}
                 {liveLogs.length > 0 && (
                   <div className="logs-box">
                     <div className="logs-title">🖥 Live Logs</div>
@@ -578,8 +741,12 @@ export default function Home() {
             )}
           </div>
 
+          {/* Clips Ready */}
           {status && status.status === "done" && (
             <div className="card">
+              <div className="expire-banner">
+                ⏰ Clips 24 ghante baad Cloudinary se delete ho jayengi — abhi download kar lo!
+              </div>
               <div className="clips-header">
                 ✅ Clips Ready
                 <span className="clip-count">{status.clips.length} clips</span>
@@ -589,15 +756,32 @@ export default function Home() {
               )}
               <div className="clip-list">
                 {status.clips.map(clip => (
-                  <div key={clip.index} className="clip-item">
-                    <div className="clip-num">#{clip.index}</div>
-                    <div className="clip-info">
-                      <div className="clip-reason">{clip.reason}</div>
-                      <div className="clip-time">⏱ {formatTime(clip.start)} se shuru</div>
+                  <div key={clip.index} className="clip-card">
+                    <video
+                      className="clip-video"
+                      src={clip.url}
+                      controls
+                      preload="metadata"
+                      playsInline
+                    />
+                    <div className="clip-meta">
+                      <div className="clip-meta-top">
+                        <div className="clip-num">#{clip.index}</div>
+                        <div className="clip-info">
+                          <div className="clip-reason">{clip.reason}</div>
+                          <div className="clip-time">⏱ {formatTime(clip.start)} se shuru</div>
+                        </div>
+                      </div>
+                      <div className="clip-actions">
+                        <button
+                          className="dl-btn"
+                          disabled={downloadingIdx === clip.index}
+                          onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`, clip.index)}
+                        >
+                          {downloadingIdx === clip.index ? "⏳ Downloading..." : "⬇️ Download"}
+                        </button>
+                      </div>
                     </div>
-                    <button className="dl-btn" onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`)}>
-                      ⬇️ Download
-                    </button>
                   </div>
                 ))}
               </div>
@@ -621,28 +805,39 @@ export default function Home() {
           {oldSessions.length === 0 ? (
             <div className="side-empty">Abhi koi purani clips nahi hain</div>
           ) : (
-            oldSessions.map(session => (
-              <div key={session.id} className="history-item">
-                <div className="history-top">
-                  <div className="history-url">🔗 {getShortUrl(session.url)}</div>
-                  <button className="del-btn" onClick={() => deleteSession(session.id)}>🗑 Delete</button>
+            oldSessions.map(session => {
+              const expiry = getExpiryInfo(session.createdAt);
+              return (
+                <div key={session.id} className="history-item">
+                  <div className="history-top">
+                    <div className="history-url">🔗 {getShortUrl(session.url)}</div>
+                    <button className="del-btn" onClick={() => setConfirmDelete(session.id)}>🗑 Delete</button>
+                  </div>
+                  <span className={`expiry-badge ${expiry.expired ? "expired" : "ok"}`}>
+                    {expiry.expired ? "⚠️ Expired" : `⏱ ${expiry.label}`}
+                  </span>
+                  {session.thumbnail && (
+                    <img src={session.thumbnail} alt="thumbnail" className="history-thumb" />
+                  )}
+                  <div className="history-clips">
+                    {session.clips.map(clip => (
+                      <div key={clip.index} className="history-clip">
+                        <span className="history-clip-num">#{clip.index}</span>
+                        <span className="history-clip-text">{clip.reason}</span>
+                        <button
+                          className="history-dl"
+                          disabled={expiry.expired}
+                          onClick={() => !expiry.expired && downloadClip(clip.url, `clip_${clip.index}.mp4`)}
+                          style={expiry.expired ? { opacity: 0.3, cursor: "not-allowed" } : {}}
+                        >
+                          ⬇️
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                {session.thumbnail && (
-                  <img src={session.thumbnail} alt="thumbnail" className="history-thumb" />
-                )}
-                <div className="history-clips">
-                  {session.clips.map(clip => (
-                    <div key={clip.index} className="history-clip">
-                      <span className="history-clip-num">#{clip.index}</span>
-                      <span className="history-clip-text">{clip.reason}</span>
-                      <button className="history-dl" onClick={() => handleDownload(clip.url, `clip_${clip.index}.mp4`)}>
-                        ⬇️
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
