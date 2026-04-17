@@ -239,19 +239,24 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
     """Cut a 60-second clip using FFmpeg — 4:5 aspect ratio for Instagram"""
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
 
-    subprocess.run([
+    add_log(job_id, f"⚙️ FFmpeg encoding clip {index + 1} (ultrafast preset)...")
+
+    result = subprocess.run([
         "ffmpeg", "-y",
-        "-i", video_path,          # ← pehle input, phir seek
-        "-ss", str(max(0, start - 2)),  # ← accurate seek
+        "-ss", str(max(0, start - 2)),  # ← seek BEFORE input = fast seek
+        "-i", video_path,
         "-t", str(CLIP_DURATION),
-        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",
+        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=720:900",  # 720p — faster encode
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-preset", "fast",
-        "-crf", "28",
-        "-movflags", "+faststart",  # ← yeh add karo — proper MP4 finalize
+        "-preset", "ultrafast",  # fast → ultrafast: 3-4x speed boost
+        "-crf", "30",            # 28 → 30: slightly lower quality but much faster
+        "-movflags", "+faststart",
         output_path
-    ], capture_output=True, timeout=120)
+    ], capture_output=True, timeout=600)  # 120s → 600s timeout
+
+    if result.returncode != 0:
+        add_log(job_id, f"⚠️ FFmpeg clip {index + 1} error: {result.stderr[-200:]}")
 
     return output_path
 
