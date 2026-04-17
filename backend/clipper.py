@@ -246,11 +246,11 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
         "-ss", str(max(0, start - 2)),  # ← seek BEFORE input = fast seek
         "-i", video_path,
         "-t", str(CLIP_DURATION),
-        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=720:900",  # 720p — faster encode
+        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",  # 1080p best quality
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-preset", "ultrafast",  # fast → ultrafast: 3-4x speed boost
-        "-crf", "30",            # 28 → 30: slightly lower quality but much faster
+        "-preset", "ultrafast",  # fast encode Railway pe
+        "-crf", "26",            # 26 = high quality
         "-movflags", "+faststart",
         output_path
     ], capture_output=True, timeout=600)  # 120s → 600s timeout
