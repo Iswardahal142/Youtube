@@ -1,14 +1,24 @@
 import os
 import json
-from supabase import create_client
+import cloudinary
+import cloudinary.uploader
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-BUCKET_NAME = "yt-clipper"
+CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET")
+
+# Cloudinary config
+cloudinary.config(
+    cloud_name=CLOUDINARY_CLOUD_NAME,
+    api_key=CLOUDINARY_API_KEY,
+    api_secret=CLOUDINARY_API_SECRET,
+    secure=True
+)
 
 _redis_client = None
 _memory_jobs = {}
-_memory_logs = {}  # job_id -> [log messages]
+_memory_logs = {}
+
 
 def _get_redis():
     global _redis_client
@@ -26,15 +36,17 @@ def _get_redis():
             print(f"Redis connection failed, using in-memory: {e}")
     return None
 
+
 def init_job(job_id: str):
     data = {"status": "queued", "progress": 0, "clips": []}
     r = _get_redis()
     if r:
         r.setex(f"job:{job_id}", 86400, json.dumps(data))
-        r.delete(f"logs:{job_id}")  # purane logs clear karo
+        r.delete(f"logs:{job_id}")
     else:
         _memory_jobs[job_id] = data
         _memory_logs[job_id] = []
+
 
 def update_job(job_id: str, updates: dict):
     r = _get_redis()
@@ -48,6 +60,7 @@ def update_job(job_id: str, updates: dict):
             _memory_jobs[job_id].update(updates)
     print(f"Job {job_id}: {updates}")
 
+
 def add_log(job_id: str, message: str):
     """Live log message add karo — SSE se frontend pe jayega"""
     print(f"[LOG] {job_id}: {message}")
@@ -60,12 +73,13 @@ def add_log(job_id: str, message: str):
             _memory_logs[job_id] = []
         _memory_logs[job_id].append(message)
 
+
 def get_job_logs(job_id: str) -> list:
-    """Saare logs return karo"""
     r = _get_redis()
     if r:
         return r.lrange(f"logs:{job_id}", 0, -1)
     return _memory_logs.get(job_id, [])
+
 
 def get_job_status(job_id: str):
     r = _get_redis()
@@ -74,25 +88,24 @@ def get_job_status(job_id: str):
         return json.loads(raw) if raw else None
     return _memory_jobs.get(job_id)
 
-def get_supabase_client():
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 def upload_clip(clip_path: str, job_id: str, index: int) -> str:
-    """Upload clip to Supabase Storage and return public URL"""
+    """Upload clip to Cloudinary — 24hr baad auto-delete"""
     try:
-        supabase = get_supabase_client()
-        file_name = f"{job_id}/clip_{index+1}.mp4"
+        public_id = f"yt-clipper/{job_id}/clip_{index + 1}"
 
-        with open(clip_path, "rb") as f:
-            supabase.storage.from_(BUCKET_NAME).upload(
-                file_name,
-                f,
-                {"content-type": "video/mp4"}
-            )
+        result = cloudinary.uploader.upload(
+            clip_path,
+            public_id=public_id,
+            resource_type="video",
+            invalidate=True,
+            tags=[f"job_{job_id}"],
+        )
 
-        url = supabase.storage.from_(BUCKET_NAME).get_public_url(file_name)
-        url = url + "?download=" + f"clip_{index+1}.mp4"
+        url = result.get("secure_url", "")
+        print(f"✅ Cloudinary upload done: {url}")
         return url
+
     except Exception as e:
         print(f"Upload error: {e}")
         return ""
