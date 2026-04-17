@@ -10,46 +10,6 @@ RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
 
-# YouTube cookies — Railway pe env var se set karo: YT_COOKIES_B64
-COOKIES_PATH = "/tmp/yt_cookies.txt"
-
-def setup_cookies():
-    """Base64 env var se cookies.txt banao"""
-    cookies_b64 = os.environ.get("YT_COOKIES_B64", "")
-    if cookies_b64 and not os.path.exists(COOKIES_PATH):
-        import base64
-        try:
-            decoded = base64.b64decode(cookies_b64).decode("utf-8")
-            with open(COOKIES_PATH, "w") as f:
-                f.write(decoded)
-        except Exception as e:
-            print(f"Cookies setup error: {e}")
-
-def get_ytdlp_cmd(url: str, output_path: str, extra_args: list = []) -> list:
-    """yt-dlp command banao — cookies available hain toh use karo"""
-    setup_cookies()
-
-    cmd = ["yt-dlp"]
-
-    # Cookies available hain toh add karo
-    if os.path.exists(COOKIES_PATH):
-        cmd += ["--cookies", COOKIES_PATH]
-
-    cmd += [
-        "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-        "--no-playlist",
-        "--no-check-certificate",
-        # Bot detection bypass
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--add-header", "Accept-Language:en-US,en;q=0.9",
-        # Sleep thoda — rate limiting se bachao
-        "--sleep-requests", "1",
-    ]
-
-    cmd += extra_args
-    cmd += ["-o", output_path, url]
-    return cmd
-
 
 def download_video(url: str, video_path: str, job_id: str) -> bool:
     """Download video — RapidAPI first, yt-dlp fallback"""
@@ -121,7 +81,7 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
     except Exception as e:
         add_log(job_id, f"⚠️ RapidAPI fail: {e} — yt-dlp fallback shuru...")
 
-    # --- Method 2: yt-dlp fallback (cookies + user-agent ke saath) ---
+    # --- Method 2: yt-dlp fallback ---
     try:
         add_log(job_id, "🔄 yt-dlp se download ho raha hai...")
         update_job(job_id, {"progress": 12})
@@ -129,7 +89,15 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
         if os.path.exists(video_path):
             os.remove(video_path)
 
-        cmd = get_ytdlp_cmd(url, video_path)
+        # ffmpeg merge avoid karo — single file format use karo
+        cmd = [
+            "yt-dlp",
+            "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+            "--no-playlist",
+            "--no-check-certificate",
+            "-o", video_path,
+            url
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
@@ -150,20 +118,14 @@ def get_transcript(url: str, job_id: str) -> list:
     try:
         add_log(job_id, "🎙️ Subtitles/transcript extract ho rahi hai...")
         subtitle_path = f"/tmp/subs_{os.path.basename(url)[-10:]}"
-
-        setup_cookies()
-        cmd = ["yt-dlp"]
-        if os.path.exists(COOKIES_PATH):
-            cmd += ["--cookies", COOKIES_PATH]
-
-        cmd += [
+        cmd = [
+            "yt-dlp",
             "--write-auto-sub",
             "--write-sub",
             "--sub-lang", "en",
             "--sub-format", "json3",
             "--skip-download",
             "--no-check-certificate",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "-o", subtitle_path,
             url
         ]
@@ -281,17 +243,17 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
 
     result = subprocess.run([
         "ffmpeg", "-y",
-        "-ss", str(max(0, start - 2)),
+        "-ss", str(max(0, start - 2)),  # ← seek BEFORE input = fast seek
         "-i", video_path,
         "-t", str(CLIP_DURATION),
-        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",
+        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",  # 1080p best quality
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-preset", "ultrafast",
-        "-crf", "26",
+        "-preset", "ultrafast",  # fast encode Railway pe
+        "-crf", "26",            # 26 = high quality
         "-movflags", "+faststart",
         output_path
-    ], capture_output=True, timeout=600)
+    ], capture_output=True, timeout=600)  # 120s → 600s timeout
 
     if result.returncode != 0:
         add_log(job_id, f"⚠️ FFmpeg clip {index + 1} error: {result.stderr[-200:]}")
