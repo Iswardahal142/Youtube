@@ -70,7 +70,13 @@ function getExpiryInfo(createdAt: number) {
 // Cloudinary ke liye fetch+blob download
 async function downloadClip(clipUrl: string, fileName: string) {
   try {
-    const res = await fetch(clipUrl);
+    // Cloudinary fl_attachment flag se forced download hoga
+    const dlUrl = clipUrl.includes("/upload/")
+      ? clipUrl.replace("/upload/", "/upload/fl_attachment/")
+      : clipUrl;
+
+    const res = await fetch(dlUrl, { mode: "cors" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const blob = await res.blob();
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -79,9 +85,9 @@ async function downloadClip(clipUrl: string, fileName: string) {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
   } catch {
-    // fallback — direct open
+    // fallback — direct open in new tab
     window.open(clipUrl, "_blank");
   }
 }
@@ -120,6 +126,8 @@ export default function Home() {
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null); // session id
   const [downloadingIdx, setDownloadingIdx] = useState<number | null>(null);
+  const [uploadingIdx, setUploadingIdx] = useState<number | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const sseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -294,6 +302,16 @@ export default function Home() {
     setDownloadingIdx(null);
   };
 
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const handleUpload = (idx: number) => {
+    // YouTube upload — coming soon
+    showToast("🚀 YouTube upload coming soon!");
+  };
+
   const cfg = status ? statusConfig[status.status] : null;
   const oldSessions = savedSessions.filter(s => s.id !== currentSessionId);
 
@@ -429,6 +447,10 @@ export default function Home() {
         @keyframes pulse {
           0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
         }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+          to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
         .step-text { color: #555; }
         .step.done .step-text { color: #888; }
         .step.active .step-text { color: #f0f0f0; }
@@ -513,6 +535,15 @@ export default function Home() {
         .clip-actions {
           display: flex; gap: 8px;
         }
+        .upload-btn {
+          background: #1a1a2e; color: #818cf8;
+          border: 1px solid #818cf833; border-radius: 10px;
+          padding: 9px 14px; font-size: 12px;
+          font-weight: 600; font-family: 'DM Sans', sans-serif;
+          cursor: pointer; transition: background 0.2s;
+          white-space: nowrap;
+        }
+        .upload-btn:hover { background: #22224a; }
         .dl-btn {
           flex: 1;
           background: #ff2d2d; color: #fff;
@@ -673,6 +704,18 @@ export default function Home() {
         />
       )}
 
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 32, left: "50%", transform: "translateX(-50%)",
+          background: "#1e1e2e", border: "1px solid #818cf844", color: "#818cf8",
+          borderRadius: 12, padding: "12px 24px", fontSize: 13, fontWeight: 600,
+          zIndex: 9999, boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+          animation: "fadeIn 0.2s ease"
+        }}>
+          {toast}
+        </div>
+      )}
+
       <div className="layout">
         {/* Main Column */}
         <div className="main-col">
@@ -761,6 +804,7 @@ export default function Home() {
                       className="clip-video"
                       src={clip.url}
                       controls
+                      controlsList="nodownload"
                       preload="metadata"
                       playsInline
                     />
@@ -773,6 +817,12 @@ export default function Home() {
                         </div>
                       </div>
                       <div className="clip-actions">
+                        <button
+                          className="upload-btn"
+                          onClick={() => handleUpload(clip.index)}
+                        >
+                          ▲ Upload
+                        </button>
                         <button
                           className="dl-btn"
                           disabled={downloadingIdx === clip.index}
