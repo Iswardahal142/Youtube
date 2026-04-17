@@ -94,17 +94,24 @@ def upload_clip(clip_path: str, job_id: str, index: int) -> str:
     try:
         public_id = f"yt-clipper/{job_id}/clip_{index + 1}"
 
-        result = cloudinary.uploader.upload(
-            clip_path,
-            public_id=public_id,
-            resource_type="video",
-            invalidate=True,
-            tags=[f"job_{job_id}"],
-        )
+        with open(clip_path, "rb") as f:
+            result = cloudinary.uploader.upload(
+                f,
+                public_id=public_id,
+                resource_type="video",
+                invalidate=True,
+                tags=[f"job_{job_id}"],
+                timeout=300,
+                chunk_size=6000000,
+            )
 
         url = result.get("secure_url", "")
         print(f"✅ Cloudinary upload done: {url}")
         return url
+
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return ""
 
     except Exception as e:
         print(f"Upload error: {e}")
