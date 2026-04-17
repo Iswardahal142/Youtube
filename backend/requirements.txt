@@ -4,4 +4,4 @@ requests
 yt-dlp
 redis
 cloudinary
-
+ffmpeg-python
