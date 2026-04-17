@@ -239,22 +239,21 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
     """Cut a 60-second clip using FFmpeg — 4:5 aspect ratio for Instagram"""
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
 
-    # 4:5 aspect ratio crop — center se crop karo, Instagram ke liye 1080x1350
     subprocess.run([
         "ffmpeg", "-y",
-        "-ss", str(max(0, start - 2)),
-        "-i", video_path,
+        "-i", video_path,          # ← pehle input, phir seek
+        "-ss", str(max(0, start - 2)),  # ← accurate seek
         "-t", str(CLIP_DURATION),
         "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",
         "-c:v", "libx264",
         "-c:a", "aac",
         "-preset", "fast",
         "-crf", "28",
+        "-movflags", "+faststart",  # ← yeh add karo — proper MP4 finalize
         output_path
     ], capture_output=True, timeout=120)
 
     return output_path
-
 
 def process_video(url: str, job_id: str):
     """Main pipeline: download → subtitles → AI → cut → upload"""
