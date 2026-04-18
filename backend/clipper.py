@@ -424,3 +424,4 @@ def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "po
     except Exception as e:
         add_log(job_id, f"❌ Fatal error: {e}")
         update_job(job_id, {"status": "error", "error": str(e)})
+
