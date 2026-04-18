@@ -199,16 +199,14 @@ def get_transcript(url: str, job_id: str) -> list:
     return []
 
 
-def find_best_moments(segments: list, video_duration: int, job_id: str,
-                       clip_duration: int = 60, fmt: str = "portrait") -> list:
+def find_best_moments(segments: list, video_duration: int, job_id: str) -> list:
     """Use OpenRouter AI to find top 10 most interesting moments"""
     if not segments:
         step = video_duration // TOP_N_CLIPS
         add_log(job_id, f"🤖 Transcript nahi tha — equally spaced {TOP_N_CLIPS} clips ban rahe hain")
         return [{"start": i * step, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
 
-    fmt_label = "vertical/portrait (Instagram Reels, YouTube Shorts)" if fmt == "portrait" else "horizontal/landscape (YouTube, wide screen)"
-    add_log(job_id, f"🤖 AI best moments dhundh raha hai ({clip_duration}s, {fmt})...")
+    add_log(job_id, "🤖 AI best moments dhundh raha hai...")
 
     transcript_text = ""
     for seg in segments:
@@ -217,13 +215,10 @@ def find_best_moments(segments: list, video_duration: int, job_id: str,
         transcript_text += f"[{start}s] {text}\n"
 
     prompt = f"""Ye ek YouTube video ka transcript hai timestamps ke saath.
-Mujhe TOP 10 most interesting/viral moments chahiye jo {clip_duration} second clips ban sakein.
-Format: {fmt_label}
+Mujhe TOP 10 most interesting/viral moments chahiye jo 60 second clips ban sakein.
 
 Rules:
-- Har moment exactly {clip_duration} seconds ka complete content ho
-- {"Short punchy moments prefer karo — hook strong honi chahiye" if clip_duration == 30 else "Complete thought/story ho — beginning middle end" if clip_duration == 60 else "Detailed explanation ya story wale moments prefer karo"}
-- {"Vertical format ke liye close-up ya talking head moments zyada suitable hain" if fmt == "portrait" else "Landscape ke liye wide shots ya demonstrations wale moments prefer karo"}
+- Har moment ek complete thought/story ho
 - Exciting, informative, ya emotional moments prefer karo
 - Response SIRF JSON mein do, kuch aur mat likho
 
@@ -337,7 +332,7 @@ def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "po
         segments = get_transcript(url, job_id)
 
         update_job(job_id, {"status": "analyzing", "progress": 50})
-        moments = find_best_moments(segments, duration, job_id, clip_duration=clip_duration, fmt=fmt)
+        moments = find_best_moments(segments, duration, job_id)
 
         if not moments:
             moments = [{"start": i * 360, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
