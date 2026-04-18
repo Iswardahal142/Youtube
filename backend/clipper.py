@@ -334,9 +334,14 @@ def get_video_duration(video_path: str) -> int:
 
 
 def cut_clip(video_path: str, start: int, job_id: str, index: int,
-             clip_duration: int = 60, fmt: str = "portrait") -> str:
+             clip_duration: int = 60, fmt: str = "portrait", video_duration: int = 0) -> str:
     """Cut clip — portrait (4:5) ya landscape (16:9)"""
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
+
+    # Safety clamp - start time video duration ke andar
+    if video_duration > 0:
+        start = min(int(start), max(0, video_duration - clip_duration - 2))
+    start = max(0, int(start))
 
     if fmt == "landscape":
         vf = "scale=1920:1080:flags=lanczos"
@@ -347,7 +352,7 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int,
 
     result = subprocess.run([
         "ffmpeg", "-y",
-        "-ss", str(max(0, start - 2)),
+        "-ss", str(start),
         "-i", video_path,
         "-t", str(clip_duration),
         "-vf", vf,
@@ -356,6 +361,7 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int,
         "-preset", "medium",
         "-crf", "18",
         "-b:a", "192k",
+        "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart",
         output_path
     ], capture_output=True, timeout=600)
@@ -410,7 +416,7 @@ def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "po
             reason = moment.get("reason", f"Clip {i+1}")
 
             add_log(job_id, f"✂️ Clip {i+1}/{len(moments)} cut ho rahi hai ({start//60}m {start%60}s se)...")
-            clip_path = cut_clip(video_path, start, job_id, i, clip_duration=clip_duration, fmt=fmt)
+            clip_path = cut_clip(video_path, start, job_id, i, clip_duration=clip_duration, fmt=fmt, video_duration=duration)
 
             if os.path.exists(clip_path):
                 progress = 60 + int(((i + 1) / len(moments)) * 35)
