@@ -49,34 +49,67 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
     video_id = video_id_match.group(1)
     add_log(job_id, f"🔍 Video ID: {video_id}")
 
-    # --- Method 1: pytubefix (no auth needed, server-friendly) ---
+    # --- Method 1: pytubefix — best adaptive video + audio merge ---
     try:
-        add_log(job_id, "🐍 pytubefix se download try ho raha hai...")
+        add_log(job_id, "🐍 pytubefix se download try ho raha hai (best quality)...")
         from pytubefix import YouTube
 
         yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
-        stream = (
-            yt.streams.filter(progressive=True, file_extension="mp4", res="720p").first()
-            or yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").last()
-            or yt.streams.filter(progressive=True).order_by("resolution").last()
-        )
-        if not stream:
-            raise Exception("No stream found via pytubefix")
-
-        add_log(job_id, f"⬇️ pytubefix: {stream.resolution} stream mili, download ho rahi hai...")
-        update_job(job_id, {"progress": 12})
-
         tmp_dir = tempfile.mkdtemp()
-        out_path = stream.download(output_path=tmp_dir, filename="video.mp4")
 
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-            os.rename(out_path, video_path)
+        # Best adaptive video stream (1080p -> 720p -> best available)
+        video_stream = (
+            yt.streams.filter(adaptive=True, file_extension="mp4", res="1080p").first()
+            or yt.streams.filter(adaptive=True, file_extension="mp4", res="720p").first()
+            or yt.streams.filter(adaptive=True, file_extension="mp4").order_by("resolution").last()
+        )
+        # Best audio stream
+        audio_stream = (
+            yt.streams.filter(adaptive=True, only_audio=True, file_extension="mp4").order_by("abr").last()
+            or yt.streams.filter(only_audio=True).order_by("abr").last()
+        )
+
+        if not video_stream or not audio_stream:
+            raise Exception("Adaptive stream nahi mili")
+
+        add_log(job_id, f"⬇️ pytubefix: {video_stream.resolution} video + audio alag download ho raha hai...")
+        update_job(job_id, {"progress": 10})
+
+        video_tmp = os.path.join(tmp_dir, "video_raw.mp4")
+        audio_tmp = os.path.join(tmp_dir, "audio_raw.mp4")
+
+        video_stream.download(output_path=tmp_dir, filename="video_raw.mp4")
+        update_job(job_id, {"progress": 18})
+        audio_stream.download(output_path=tmp_dir, filename="audio_raw.mp4")
+        update_job(job_id, {"progress": 22})
+
+        if not os.path.exists(video_tmp) or not os.path.exists(audio_tmp):
+            raise Exception("Video ya audio file download nahi hui")
+
+        # FFmpeg se merge karo — lossless copy, no re-encode
+        add_log(job_id, "🔀 Video + Audio merge ho raha hai...")
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", video_tmp,
+            "-i", audio_tmp,
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            video_path
+        ], capture_output=True, text=True, timeout=300)
+
+        # Cleanup tmp files
+        for f in [video_tmp, audio_tmp]:
+            if os.path.exists(f):
+                os.remove(f)
+
+        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ pytubefix download complete! ({size_mb:.1f} MB)")
+            add_log(job_id, f"✅ pytubefix merge complete! {video_stream.resolution} ({size_mb:.1f} MB)")
             update_job(job_id, {"progress": 28})
             return True
         else:
-            add_log(job_id, "⚠️ pytubefix file empty — RapidAPI try karega")
+            add_log(job_id, "⚠️ pytubefix merge fail — RapidAPI try karega")
 
     except Exception as e:
         add_log(job_id, f"⚠️ pytubefix fail: {str(e)[:150]} — RapidAPI try karega...")
@@ -113,9 +146,9 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
     except Exception as e:
         add_log(job_id, f"⚠️ RapidAPI fail: {str(e)[:150]} — yt-dlp try karega...")
 
-    # --- Method 3: yt-dlp with android_vr client (best for server environments) ---
+    # --- Method 3: yt-dlp with mobile user-agent ---
     try:
-        add_log(job_id, "🔄 yt-dlp (android_vr client) se download ho raha hai...")
+        add_log(job_id, "🔄 yt-dlp se download ho raha hai...")
         if os.path.exists(video_path):
             os.remove(video_path)
         update_job(job_id, {"progress": 12})
@@ -125,11 +158,10 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
             "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
             "--no-playlist",
             "--no-check-certificate",
-            "--extractor-retries", "5",
-            "--fragment-retries", "5",
-            "--retry-sleep", "3",
-            "--extractor-args", "youtube:player_client=android_vr",
-            "--user-agent", "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+            "--extractor-retries", "3",
+            "--fragment-retries", "3",
+            "--retry-sleep", "5",
+            "--user-agent", "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 Chrome/90.0.4430.91 Mobile Safari/537.36",
             "-o", video_path,
             url,
         ]
@@ -137,51 +169,15 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ yt-dlp (android_vr) download complete! ({size_mb:.1f} MB)")
+            add_log(job_id, f"✅ yt-dlp download complete! ({size_mb:.1f} MB)")
             update_job(job_id, {"progress": 28})
             return True
         else:
-            add_log(job_id, f"⚠️ android_vr fail — android client try karega...")
-
-    except Exception as e:
-        add_log(job_id, f"⚠️ yt-dlp android_vr error: {str(e)[:150]} — android try karega...")
-
-    # --- Method 4: yt-dlp with android client fallback ---
-    try:
-        add_log(job_id, "🔄 yt-dlp (android client) se download ho raha hai...")
-        if os.path.exists(video_path):
-            os.remove(video_path)
-        update_job(job_id, {"progress": 14})
-
-        cmd = [
-            "yt-dlp",
-            "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-            "--no-playlist",
-            "--no-check-certificate",
-            "--extractor-retries", "5",
-            "--fragment-retries", "5",
-            "--retry-sleep", "3",
-            "--extractor-args", "youtube:player_client=android",
-            "--add-header", "X-Youtube-Client-Name:3",
-            "--add-header", "X-Youtube-Client-Version:17.31.35",
-            "--add-header", "Origin:https://www.youtube.com",
-            "--user-agent", "com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip",
-            "-o", video_path,
-            url,
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
-        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
-            size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ yt-dlp (android) download complete! ({size_mb:.1f} MB)")
-            update_job(job_id, {"progress": 28})
-            return True
-        else:
-            add_log(job_id, f"❌ Saare methods fail ho gaye: {result.stderr[-300:]}")
+            add_log(job_id, f"❌ Teeno methods fail ho gaye: {result.stderr[-200:]}")
             return False
 
     except Exception as e:
-        add_log(job_id, f"❌ yt-dlp android error: {str(e)[:150]}")
+        add_log(job_id, f"❌ yt-dlp error: {str(e)[:150]}")
         return False
 
 
@@ -318,9 +314,9 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int,
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
 
     if fmt == "landscape":
-        vf = "scale=1280:720"
+        vf = "scale=1920:1080:flags=lanczos"
     else:
-        vf = "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350"
+        vf = "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920:flags=lanczos"
 
     add_log(job_id, f"⚙️ Clip {index + 1} — {clip_duration}s {fmt} encoding...")
 
@@ -332,8 +328,9 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int,
         "-vf", vf,
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-preset", "ultrafast",
-        "-crf", "26",
+        "-preset", "medium",
+        "-crf", "18",
+        "-b:a", "192k",
         "-movflags", "+faststart",
         output_path
     ], capture_output=True, timeout=600)
@@ -424,4 +421,3 @@ def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "po
     except Exception as e:
         add_log(job_id, f"❌ Fatal error: {e}")
         update_job(job_id, {"status": "error", "error": str(e)})
-
