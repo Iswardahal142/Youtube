@@ -90,25 +90,33 @@ def get_job_status(job_id: str):
 
 
 def upload_clip(clip_path: str, job_id: str, index: int) -> str:
-    """Upload clip to Cloudinary — 24hr baad auto-delete"""
+    """Upload clip to Cloudinary — chunked upload for large files"""
     try:
         public_id = f"yt-clipper/{job_id}/clip_{index + 1}"
 
-        with open(clip_path, "rb") as f:
-            result = cloudinary.uploader.upload(
-                f,
-                public_id=public_id,
-                resource_type="video",
-                invalidate=True,
-                tags=[f"job_{job_id}"],
-                timeout=300,
-                chunk_size=6000000,
-            )
+        # File size check
+        file_size = os.path.getsize(clip_path)
+        size_mb = file_size / (1024 * 1024)
+        print(f"Uploading clip {index + 1}: {size_mb:.1f} MB")
+
+        # 100MB se bada ho toh skip
+        if file_size > 100 * 1024 * 1024:
+            print(f"File too large ({size_mb:.1f} MB), skipping")
+            return ""
+
+        result = cloudinary.uploader.upload_large(
+            clip_path,
+            public_id=public_id,
+            resource_type="video",
+            invalidate=True,
+            tags=[f"job_{job_id}"],
+            chunk_size=20000000,  # 20MB chunks — stable upload
+        )
 
         url = result.get("secure_url", "")
         print(f"✅ Cloudinary upload done: {url}")
         return url
 
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"Upload error clip {index + 1}: {e}")
         return ""
