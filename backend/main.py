@@ -20,6 +20,8 @@ app.add_middleware(
 
 class VideoRequest(BaseModel):
     url: str
+    clip_duration: int = 60   # 30, 60, ya 90 seconds
+    fmt: str = "portrait"     # "portrait" ya "landscape"
 
 @app.get("/")
 def root():
@@ -27,9 +29,15 @@ def root():
 
 @app.post("/clip")
 async def clip_video(req: VideoRequest, background_tasks: BackgroundTasks):
+    # Validation
+    if req.clip_duration not in [30, 60, 90]:
+        req.clip_duration = 60
+    if req.fmt not in ["portrait", "landscape"]:
+        req.fmt = "portrait"
+
     job_id = str(uuid.uuid4())
     init_job(job_id)
-    background_tasks.add_task(process_video, req.url, job_id)
+    background_tasks.add_task(process_video, req.url, job_id, req.clip_duration, req.fmt)
     return {"job_id": job_id, "status": "processing"}
 
 @app.get("/status/{job_id}")
