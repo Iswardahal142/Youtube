@@ -54,7 +54,7 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
         add_log(job_id, "🐍 pytubefix se download try ho raha hai (best quality)...")
         from pytubefix import YouTube
 
-        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
+        yt = YouTube(url, use_po_token=True)
         tmp_dir = tempfile.mkdtemp()
 
         # Best adaptive video stream (1080p -> 720p -> best available)
