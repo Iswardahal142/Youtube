@@ -20,8 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN touch /tmp/yt_cookies.txt
 
-# Cache bust — har push pe naya code copy hoga
-ARG CACHEBUST=1
+# CACHE_BUST: 2026-04-18-1227 — change this line to force fresh COPY
+RUN echo "cache bust 2026-04-18-1227"
 COPY . .
 
 EXPOSE 8000
