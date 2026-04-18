@@ -120,3 +120,4 @@ def upload_clip(clip_path: str, job_id: str, index: int) -> str:
     except Exception as e:
         print(f"Upload error clip {index + 1}: {e}")
         return ""
+
