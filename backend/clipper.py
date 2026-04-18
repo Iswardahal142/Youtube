@@ -270,18 +270,24 @@ def get_video_duration(video_path: str) -> int:
         return 3600
 
 
-def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
-    """Cut a 60-second clip using FFmpeg — 4:5 aspect ratio for Instagram"""
+def cut_clip(video_path: str, start: int, job_id: str, index: int,
+             clip_duration: int = 60, fmt: str = "portrait") -> str:
+    """Cut clip — portrait (4:5) ya landscape (16:9)"""
     output_path = f"/tmp/{job_id}_clip_{index}.mp4"
 
-    add_log(job_id, f"⚙️ FFmpeg encoding clip {index + 1} (ultrafast preset)...")
+    if fmt == "landscape":
+        vf = "scale=1280:720"
+    else:
+        vf = "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350"
+
+    add_log(job_id, f"⚙️ Clip {index + 1} — {clip_duration}s {fmt} encoding...")
 
     result = subprocess.run([
         "ffmpeg", "-y",
-        "-ss", str(max(0, start - 2)),  # seek BEFORE input = fast seek
+        "-ss", str(max(0, start - 2)),
         "-i", video_path,
-        "-t", str(CLIP_DURATION),
-        "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",  # 1080p best quality
+        "-t", str(clip_duration),
+        "-vf", vf,
         "-c:v", "libx264",
         "-c:a", "aac",
         "-preset", "ultrafast",
@@ -296,10 +302,10 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
     return output_path
 
 
-def process_video(url: str, job_id: str):
+def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "portrait"):
     """Main pipeline: download → subtitles → AI → cut → upload"""
     try:
-        add_log(job_id, "🚀 Processing shuru ho gaya!")
+        add_log(job_id, f"🚀 Processing shuru ho gaya! ({clip_duration}s, {fmt})")
         update_job(job_id, {"status": "downloading", "progress": 10})
 
         video_path = f"/tmp/{job_id}.mp4"
@@ -340,7 +346,7 @@ def process_video(url: str, job_id: str):
             reason = moment.get("reason", f"Clip {i+1}")
 
             add_log(job_id, f"✂️ Clip {i+1}/{len(moments)} cut ho rahi hai ({start//60}m {start%60}s se)...")
-            clip_path = cut_clip(video_path, start, job_id, i)
+            clip_path = cut_clip(video_path, start, job_id, i, clip_duration=clip_duration, fmt=fmt)
 
             if os.path.exists(clip_path):
                 progress = 60 + int(((i + 1) / len(moments)) * 35)
