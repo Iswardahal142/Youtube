@@ -20,6 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN touch /tmp/yt_cookies.txt
 
+# Cache bust — har push pe naya code copy hoga
+ARG CACHEBUST=1
 COPY . .
 
 EXPOSE 8000
