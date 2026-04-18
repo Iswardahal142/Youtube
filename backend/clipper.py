@@ -3,6 +3,7 @@ import os
 import json
 import re
 import requests
+import tempfile
 from storage import update_job, upload_clip, add_log
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
@@ -11,105 +12,139 @@ CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
 
 
+def _stream_download(download_url: str, video_path: str, job_id: str, label: str) -> bool:
+    """Generic streaming download with progress logs"""
+    with requests.get(download_url, stream=True, timeout=600) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        last_logged_pct = 0
+        with open(video_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    dl_pct = int((downloaded / total) * 100)
+                    progress = 10 + int((downloaded / total) * 18)
+                    update_job(job_id, {"progress": progress})
+                    if dl_pct - last_logged_pct >= 20:
+                        mb_done = downloaded / (1024 * 1024)
+                        mb_total = total / (1024 * 1024)
+                        add_log(job_id, f"⬇️ {label}: {dl_pct}% ({mb_done:.1f}/{mb_total:.1f} MB)")
+                        last_logged_pct = dl_pct
+    if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+        size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        add_log(job_id, f"✅ {label} download complete! ({size_mb:.1f} MB)")
+        return True
+    return False
+
+
 def download_video(url: str, video_path: str, job_id: str) -> bool:
-    """Download video — RapidAPI first, yt-dlp fallback"""
+    """Download video — pytubefix → RapidAPI → yt-dlp"""
 
-    # --- Method 1: RapidAPI ---
+    video_id_match = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
+    if not video_id_match:
+        add_log(job_id, "❌ Video ID nahi mila URL se")
+        return False
+    video_id = video_id_match.group(1)
+    add_log(job_id, f"🔍 Video ID: {video_id}")
+
+    # --- Method 1: pytubefix (no auth needed, server-friendly) ---
     try:
-        video_id = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
-        if not video_id:
-            add_log(job_id, "❌ Video ID nahi mila URL se")
-            return False
-        video_id = video_id.group(1)
-        add_log(job_id, f"🔍 Video ID mila: {video_id}")
+        add_log(job_id, "🐍 pytubefix se download try ho raha hai...")
+        from pytubefix import YouTube
 
+        yt = YouTube(url, use_oauth=False, allow_oauth_cache=False)
+        stream = (
+            yt.streams.filter(progressive=True, file_extension="mp4", res="720p").first()
+            or yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").last()
+            or yt.streams.filter(progressive=True).order_by("resolution").last()
+        )
+        if not stream:
+            raise Exception("No stream found via pytubefix")
+
+        add_log(job_id, f"⬇️ pytubefix: {stream.resolution} stream mili, download ho rahi hai...")
+        update_job(job_id, {"progress": 12})
+
+        tmp_dir = tempfile.mkdtemp()
+        out_path = stream.download(output_path=tmp_dir, filename="video.mp4")
+
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
+            os.rename(out_path, video_path)
+            size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            add_log(job_id, f"✅ pytubefix download complete! ({size_mb:.1f} MB)")
+            update_job(job_id, {"progress": 28})
+            return True
+        else:
+            add_log(job_id, "⚠️ pytubefix file empty — RapidAPI try karega")
+
+    except Exception as e:
+        add_log(job_id, f"⚠️ pytubefix fail: {str(e)[:150]} — RapidAPI try karega...")
+
+    # --- Method 2: RapidAPI ---
+    try:
         add_log(job_id, "📡 RapidAPI se video info le raha hai...")
+        if os.path.exists(video_path):
+            os.remove(video_path)
+
         response = requests.get(
             "https://youtube-media-downloader.p.rapidapi.com/v2/video/details",
             headers={
                 "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com",
-                "x-rapidapi-key": RAPIDAPI_KEY
+                "x-rapidapi-key": RAPIDAPI_KEY,
             },
             params={"videoId": video_id},
-            timeout=30
+            timeout=30,
         )
         data = response.json()
-
         videos = data.get("videos", {}).get("items", [])
-        mp4_videos = [
-            v for v in videos
-            if v.get("extension") == "mp4" and v.get("height", 0) <= 720
-        ]
+        mp4_videos = [v for v in videos if v.get("extension") == "mp4" and v.get("height", 0) <= 720]
 
         if not mp4_videos:
-            add_log(job_id, "⚠️ RapidAPI me koi MP4 nahi mila — yt-dlp try karega")
             raise Exception("No MP4 found via RapidAPI")
 
         best = sorted(mp4_videos, key=lambda x: x.get("height", 0), reverse=True)[0]
-        download_url = best.get("url")
-        add_log(job_id, f"⬇️ {best.get('height')}p RapidAPI se download ho rahi hai...")
-
-        with requests.get(download_url, stream=True, timeout=600) as r:
-            r.raise_for_status()
-            total = int(r.headers.get('content-length', 0))
-            downloaded = 0
-            last_logged_pct = 0
-
-            with open(video_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-
-                    if total:
-                        dl_pct = int((downloaded / total) * 100)
-                        progress = 10 + int((downloaded / total) * 18)
-                        update_job(job_id, {"progress": progress})
-
-                        if dl_pct - last_logged_pct >= 20:
-                            mb_done = downloaded / (1024 * 1024)
-                            mb_total = total / (1024 * 1024)
-                            add_log(job_id, f"⬇️ Download: {dl_pct}% ({mb_done:.1f}/{mb_total:.1f} MB)")
-                            last_logged_pct = dl_pct
-
-        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
-            size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ RapidAPI download complete! ({size_mb:.1f} MB)")
+        add_log(job_id, f"⬇️ RapidAPI: {best.get('height')}p stream mili...")
+        if _stream_download(best.get("url"), video_path, job_id, "RapidAPI"):
+            update_job(job_id, {"progress": 28})
             return True
-        else:
-            add_log(job_id, "⚠️ RapidAPI file empty — yt-dlp try karega")
+        add_log(job_id, "⚠️ RapidAPI file empty — yt-dlp try karega")
 
     except Exception as e:
-        add_log(job_id, f"⚠️ RapidAPI fail: {e} — yt-dlp fallback shuru...")
+        add_log(job_id, f"⚠️ RapidAPI fail: {str(e)[:150]} — yt-dlp try karega...")
 
-    # --- Method 2: yt-dlp fallback ---
+    # --- Method 3: yt-dlp with mobile user-agent ---
     try:
         add_log(job_id, "🔄 yt-dlp se download ho raha hai...")
-        update_job(job_id, {"progress": 12})
-
         if os.path.exists(video_path):
             os.remove(video_path)
+        update_job(job_id, {"progress": 12})
 
-        # ffmpeg merge avoid karo — single file format use karo
         cmd = [
             "yt-dlp",
             "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
             "--no-playlist",
             "--no-check-certificate",
+            "--extractor-retries", "3",
+            "--fragment-retries", "3",
+            "--retry-sleep", "5",
+            "--user-agent", "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 Chrome/90.0.4430.91 Mobile Safari/537.36",
             "-o", video_path,
-            url
+            url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
             add_log(job_id, f"✅ yt-dlp download complete! ({size_mb:.1f} MB)")
+            update_job(job_id, {"progress": 28})
             return True
         else:
-            add_log(job_id, f"❌ yt-dlp bhi fail: {result.stderr[-300:]}")
+            add_log(job_id, f"❌ Teeno methods fail ho gaye: {result.stderr[-200:]}")
             return False
 
     except Exception as e:
-        add_log(job_id, f"❌ yt-dlp error: {e}")
+        add_log(job_id, f"❌ yt-dlp error: {str(e)[:150]}")
         return False
 
 
@@ -243,22 +278,23 @@ def cut_clip(video_path: str, start: int, job_id: str, index: int) -> str:
 
     result = subprocess.run([
         "ffmpeg", "-y",
-        "-ss", str(max(0, start - 2)),  # ← seek BEFORE input = fast seek
+        "-ss", str(max(0, start - 2)),  # seek BEFORE input = fast seek
         "-i", video_path,
         "-t", str(CLIP_DURATION),
         "-vf", "crop=ih*4/5:ih:(iw-ih*4/5)/2:0,scale=1080:1350",  # 1080p best quality
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-preset", "ultrafast",  # fast encode Railway pe
-        "-crf", "26",            # 26 = high quality
+        "-preset", "ultrafast",
+        "-crf", "26",
         "-movflags", "+faststart",
         output_path
-    ], capture_output=True, timeout=600)  # 120s → 600s timeout
+    ], capture_output=True, timeout=600)
 
     if result.returncode != 0:
         add_log(job_id, f"⚠️ FFmpeg clip {index + 1} error: {result.stderr[-200:]}")
 
     return output_path
+
 
 def process_video(url: str, job_id: str):
     """Main pipeline: download → subtitles → AI → cut → upload"""
