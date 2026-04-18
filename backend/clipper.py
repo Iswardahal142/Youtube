@@ -4,12 +4,29 @@ import json
 import re
 import requests
 import tempfile
+import base64
 from storage import update_job, upload_clip, add_log
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 CLIP_DURATION = 60  # seconds
 TOP_N_CLIPS = 10
+
+# YT Cookies setup — env se decode karke /tmp mein save karo
+COOKIES_FILE = "/tmp/yt_cookies.txt"
+def _setup_cookies():
+    cookies_b64 = os.environ.get("YT_COOKIES_B64", "")
+    if cookies_b64:
+        try:
+            decoded = base64.b64decode(cookies_b64).decode("utf-8")
+            with open(COOKIES_FILE, "w") as f:
+                f.write(decoded)
+            return True
+        except Exception as e:
+            print(f"Cookie setup error: {e}")
+    return False
+
+HAS_COOKIES = _setup_cookies()
 
 
 def _stream_download(download_url: str, video_path: str, job_id: str, label: str) -> bool:
@@ -119,6 +136,7 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
             "--retry-sleep", "3",
             "--extractor-args", "youtube:player_client=android_vr",
             "--user-agent", "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+        ] + (["--cookies", COOKIES_FILE] if HAS_COOKIES else []) + [
             "-o", video_path,
             url,
         ]
@@ -155,6 +173,7 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
             "--add-header", "X-Youtube-Client-Name:3",
             "--add-header", "X-Youtube-Client-Version:17.31.35",
             "--user-agent", "com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip",
+        ] + (["--cookies", COOKIES_FILE] if HAS_COOKIES else []) + [
             "-o", video_path,
             url,
         ]
@@ -452,4 +471,3 @@ def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "po
     except Exception as e:
         add_log(job_id, f"❌ Fatal error: {e}")
         update_job(job_id, {"status": "error", "error": str(e)})
-
