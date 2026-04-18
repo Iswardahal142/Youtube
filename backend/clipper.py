@@ -113,9 +113,9 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
     except Exception as e:
         add_log(job_id, f"⚠️ RapidAPI fail: {str(e)[:150]} — yt-dlp try karega...")
 
-    # --- Method 3: yt-dlp with mobile user-agent ---
+    # --- Method 3: yt-dlp with android_vr client (best for server environments) ---
     try:
-        add_log(job_id, "🔄 yt-dlp se download ho raha hai...")
+        add_log(job_id, "🔄 yt-dlp (android_vr client) se download ho raha hai...")
         if os.path.exists(video_path):
             os.remove(video_path)
         update_job(job_id, {"progress": 12})
@@ -125,10 +125,11 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
             "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
             "--no-playlist",
             "--no-check-certificate",
-            "--extractor-retries", "3",
-            "--fragment-retries", "3",
-            "--retry-sleep", "5",
-            "--user-agent", "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 Chrome/90.0.4430.91 Mobile Safari/537.36",
+            "--extractor-retries", "5",
+            "--fragment-retries", "5",
+            "--retry-sleep", "3",
+            "--extractor-args", "youtube:player_client=android_vr",
+            "--user-agent", "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
             "-o", video_path,
             url,
         ]
@@ -136,15 +137,51 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ yt-dlp download complete! ({size_mb:.1f} MB)")
+            add_log(job_id, f"✅ yt-dlp (android_vr) download complete! ({size_mb:.1f} MB)")
             update_job(job_id, {"progress": 28})
             return True
         else:
-            add_log(job_id, f"❌ Teeno methods fail ho gaye: {result.stderr[-200:]}")
+            add_log(job_id, f"⚠️ android_vr fail — android client try karega...")
+
+    except Exception as e:
+        add_log(job_id, f"⚠️ yt-dlp android_vr error: {str(e)[:150]} — android try karega...")
+
+    # --- Method 4: yt-dlp with android client fallback ---
+    try:
+        add_log(job_id, "🔄 yt-dlp (android client) se download ho raha hai...")
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        update_job(job_id, {"progress": 14})
+
+        cmd = [
+            "yt-dlp",
+            "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+            "--no-playlist",
+            "--no-check-certificate",
+            "--extractor-retries", "5",
+            "--fragment-retries", "5",
+            "--retry-sleep", "3",
+            "--extractor-args", "youtube:player_client=android",
+            "--add-header", "X-Youtube-Client-Name:3",
+            "--add-header", "X-Youtube-Client-Version:17.31.35",
+            "--add-header", "Origin:https://www.youtube.com",
+            "--user-agent", "com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip",
+            "-o", video_path,
+            url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
+            size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            add_log(job_id, f"✅ yt-dlp (android) download complete! ({size_mb:.1f} MB)")
+            update_job(job_id, {"progress": 28})
+            return True
+        else:
+            add_log(job_id, f"❌ Saare methods fail ho gaye: {result.stderr[-300:]}")
             return False
 
     except Exception as e:
-        add_log(job_id, f"❌ yt-dlp error: {str(e)[:150]}")
+        add_log(job_id, f"❌ yt-dlp android error: {str(e)[:150]}")
         return False
 
 
@@ -199,14 +236,16 @@ def get_transcript(url: str, job_id: str) -> list:
     return []
 
 
-def find_best_moments(segments: list, video_duration: int, job_id: str) -> list:
+def find_best_moments(segments: list, video_duration: int, job_id: str,
+                       clip_duration: int = 60, fmt: str = "portrait") -> list:
     """Use OpenRouter AI to find top 10 most interesting moments"""
     if not segments:
         step = video_duration // TOP_N_CLIPS
         add_log(job_id, f"🤖 Transcript nahi tha — equally spaced {TOP_N_CLIPS} clips ban rahe hain")
         return [{"start": i * step, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
 
-    add_log(job_id, "🤖 AI best moments dhundh raha hai...")
+    fmt_label = "vertical/portrait (Instagram Reels, YouTube Shorts)" if fmt == "portrait" else "horizontal/landscape (YouTube, wide screen)"
+    add_log(job_id, f"🤖 AI best moments dhundh raha hai ({clip_duration}s, {fmt})...")
 
     transcript_text = ""
     for seg in segments:
@@ -215,10 +254,13 @@ def find_best_moments(segments: list, video_duration: int, job_id: str) -> list:
         transcript_text += f"[{start}s] {text}\n"
 
     prompt = f"""Ye ek YouTube video ka transcript hai timestamps ke saath.
-Mujhe TOP 10 most interesting/viral moments chahiye jo 60 second clips ban sakein.
+Mujhe TOP 10 most interesting/viral moments chahiye jo {clip_duration} second clips ban sakein.
+Format: {fmt_label}
 
 Rules:
-- Har moment ek complete thought/story ho
+- Har moment exactly {clip_duration} seconds ka complete content ho
+- {"Short punchy moments prefer karo — hook strong honi chahiye" if clip_duration == 30 else "Complete thought/story ho — beginning middle end" if clip_duration == 60 else "Detailed explanation ya story wale moments prefer karo"}
+- {"Vertical format ke liye close-up ya talking head moments zyada suitable hain" if fmt == "portrait" else "Landscape ke liye wide shots ya demonstrations wale moments prefer karo"}
 - Exciting, informative, ya emotional moments prefer karo
 - Response SIRF JSON mein do, kuch aur mat likho
 
@@ -332,7 +374,7 @@ def process_video(url: str, job_id: str, clip_duration: int = 60, fmt: str = "po
         segments = get_transcript(url, job_id)
 
         update_job(job_id, {"status": "analyzing", "progress": 50})
-        moments = find_best_moments(segments, duration, job_id)
+        moments = find_best_moments(segments, duration, job_id, clip_duration=clip_duration, fmt=fmt)
 
         if not moments:
             moments = [{"start": i * 360, "reason": f"Clip {i+1}"} for i in range(TOP_N_CLIPS)]
