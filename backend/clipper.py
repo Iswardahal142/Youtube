@@ -226,7 +226,6 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
 
 
 def get_transcript(url: str, job_id: str) -> list:
-    """Get transcript using yt-dlp subtitles"""
     try:
         add_log(job_id, "🎙️ Subtitles/transcript extract ho rahi hai...")
         subtitle_path = f"/tmp/subs_{os.path.basename(url)[-10:]}"
@@ -238,6 +237,9 @@ def get_transcript(url: str, job_id: str) -> list:
             "--sub-format", "json3",
             "--skip-download",
             "--no-check-certificate",
+            "--extractor-args", "youtube:player_client=android_vr",  # ← ADD
+            "--user-agent", "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",  # ← ADD
+        ] + (["--cookies", COOKIES_FILE] if HAS_COOKIES else []) + [  # ← ADD
             "-o", subtitle_path,
             url
         ]
