@@ -40,7 +40,7 @@ def _stream_download(download_url: str, video_path: str, job_id: str, label: str
 
 
 def download_video(url: str, video_path: str, job_id: str) -> bool:
-    """Download video — yt-dlp android_vr → yt-dlp android → RapidAPI"""
+    """Download video — Invidious API -> yt-dlp android_vr -> yt-dlp android -> RapidAPI"""
 
     video_id_match = re.search(r"(?:v=|youtu\.be/)([^&\n?#]+)", url)
     if not video_id_match:
@@ -49,12 +49,64 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
     video_id = video_id_match.group(1)
     add_log(job_id, f"🔍 Video ID: {video_id}")
 
-    # --- Method 1: yt-dlp android_vr (best for servers, no cookies needed) ---
+    # --- Method 1: Invidious API (no cookies, no bot detection) ---
+    INVIDIOUS_INSTANCES = [
+        "https://inv.nadeko.net",
+        "https://invidious.privacydev.net",
+        "https://iv.datura.network",
+        "https://invidious.nerdvpn.de",
+    ]
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            add_log(job_id, f"🌐 Invidious ({instance}) se try ho raha hai...")
+            api_url = f"{instance}/api/v1/videos/{video_id}"
+            resp = requests.get(api_url, timeout=15)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            formats = data.get("adaptiveFormats", []) + data.get("formatStreams", [])
+
+            # Best mp4 video (max 1080p)
+            mp4_formats = [
+                f for f in formats
+                if f.get("container") == "mp4" or "video/mp4" in f.get("type", "")
+            ]
+            # Prefer combined streams first, then adaptive
+            combined = [f for f in mp4_formats if f.get("qualityLabel") and not f.get("audioQuality") == ""]
+            video_only = sorted(
+                [f for f in mp4_formats if f.get("qualityLabel")],
+                key=lambda x: int(x.get("qualityLabel", "0p").replace("p", "").split(" ")[0] or 0),
+                reverse=True
+            )
+
+            best = video_only[0] if video_only else (mp4_formats[0] if mp4_formats else None)
+            if not best:
+                continue
+
+            dl_url = best.get("url")
+            if not dl_url:
+                continue
+
+            quality = best.get("qualityLabel", "unknown")
+            add_log(job_id, f"⬇️ Invidious: {quality} stream mili, download ho rahi hai...")
+            update_job(job_id, {"progress": 10})
+
+            if _stream_download(dl_url, video_path, job_id, f"Invidious {quality}"):
+                update_job(job_id, {"progress": 28})
+                return True
+
+        except Exception as e:
+            add_log(job_id, f"⚠️ Invidious {instance} fail: {str(e)[:100]}")
+            continue
+
+    add_log(job_id, "⚠️ Saare Invidious instances fail — yt-dlp try karega...")
+
+    # --- Method 2: yt-dlp android_vr ---
     try:
         add_log(job_id, "🔄 yt-dlp (android_vr) se download ho raha hai...")
         if os.path.exists(video_path):
             os.remove(video_path)
-        update_job(job_id, {"progress": 10})
+        update_job(job_id, {"progress": 12})
 
         cmd = [
             "yt-dlp",
@@ -74,21 +126,21 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ yt-dlp android_vr download complete! ({size_mb:.1f} MB)")
+            add_log(job_id, f"✅ yt-dlp android_vr complete! ({size_mb:.1f} MB)")
             update_job(job_id, {"progress": 28})
             return True
         else:
-            add_log(job_id, f"⚠️ android_vr fail — android client try karega...")
+            add_log(job_id, f"⚠️ android_vr fail — android try karega...")
 
     except Exception as e:
-        add_log(job_id, f"⚠️ yt-dlp android_vr error: {str(e)[:150]} — android try karega...")
+        add_log(job_id, f"⚠️ android_vr error: {str(e)[:150]}")
 
-    # --- Method 2: yt-dlp android client ---
+    # --- Method 3: yt-dlp android ---
     try:
-        add_log(job_id, "🔄 yt-dlp (android client) se download ho raha hai...")
+        add_log(job_id, "🔄 yt-dlp (android) se download ho raha hai...")
         if os.path.exists(video_path):
             os.remove(video_path)
-        update_job(job_id, {"progress": 12})
+        update_job(job_id, {"progress": 14})
 
         cmd = [
             "yt-dlp",
@@ -102,7 +154,6 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
             "--extractor-args", "youtube:player_client=android",
             "--add-header", "X-Youtube-Client-Name:3",
             "--add-header", "X-Youtube-Client-Version:17.31.35",
-            "--add-header", "Origin:https://www.youtube.com",
             "--user-agent", "com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip",
             "-o", video_path,
             url,
@@ -111,16 +162,16 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
 
         if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            add_log(job_id, f"✅ yt-dlp android download complete! ({size_mb:.1f} MB)")
+            add_log(job_id, f"✅ yt-dlp android complete! ({size_mb:.1f} MB)")
             update_job(job_id, {"progress": 28})
             return True
         else:
             add_log(job_id, f"⚠️ android fail — RapidAPI try karega...")
 
     except Exception as e:
-        add_log(job_id, f"⚠️ yt-dlp android error: {str(e)[:150]} — RapidAPI try karega...")
+        add_log(job_id, f"⚠️ android error: {str(e)[:150]}")
 
-    # --- Method 3: RapidAPI ---
+    # --- Method 4: RapidAPI ---
     try:
         add_log(job_id, "📡 RapidAPI se video info le raha hai...")
         if os.path.exists(video_path):
@@ -147,12 +198,12 @@ def download_video(url: str, video_path: str, job_id: str) -> bool:
         if _stream_download(best.get("url"), video_path, job_id, "RapidAPI"):
             update_job(job_id, {"progress": 28})
             return True
-        add_log(job_id, "⚠️ RapidAPI file empty — sab methods fail")
-        return False
 
     except Exception as e:
-        add_log(job_id, f"❌ Saare methods fail: {str(e)[:150]}")
-        return False
+        add_log(job_id, f"⚠️ RapidAPI fail: {str(e)[:150]}")
+
+    add_log(job_id, "❌ Video download fail — koi aur URL try karo")
+    return False
 
 
 def get_transcript(url: str, job_id: str) -> list:
